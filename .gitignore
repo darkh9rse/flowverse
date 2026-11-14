@@ -1,0 +1,9 @@
+# Build output (created by CMake; can always be rebuilt)
+build/
+
+# Personal editor settings
+.vscode/
+
+# Compiled files
+*.o
+*.out
