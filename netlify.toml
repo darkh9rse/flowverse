@@ -1,0 +1,36 @@
+# Netlify deployment for FlowVerse.
+#
+# The build compiles the Rust core to WebAssembly (web/pkg), then Netlify
+# publishes web/ as a static site, plus one serverless function
+# (functions/report) at /api/report.
+#
+# Set these in Netlify → Site configuration → Environment variables:
+#   ANTHROPIC_API_KEY   enables AI reports (the site works without it)
+#   RATE_LIMIT_SALT     a long random secret, used to hash visitor IPs
+# Optional: REPORT_LIMIT_PER_HOUR, REPORT_LIMIT_PER_DAY,
+#           REPORT_LIMIT_GLOBAL_PER_DAY (see functions/report/index.mjs).
+
+[build]
+  command = "bash scripts/netlify-build.sh"
+  publish = "web"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+[functions]
+  directory = "functions"
+  node_bundler = "esbuild"
+
+# Security headers for every page.
+# - script-src 'wasm-unsafe-eval' is required to compile WebAssembly; it
+#   does not allow JavaScript eval().
+# - media-src/img-src blob: lets the page show the local video file.
+# - connect-src 'self': the only network request is to /api/report on this
+#   same site. The video itself is never uploaded.
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Content-Security-Policy = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "no-referrer"
+    Permissions-Policy = "geolocation=(), microphone=(), camera=(self)"

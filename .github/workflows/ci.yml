@@ -1,0 +1,43 @@
+# Continuous integration: runs on every push and pull request.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust tests and WebAssembly build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rustup is preinstalled on GitHub runners; rust-toolchain.toml selects
+      # the pinned version, the wasm32 target and rustfmt.
+      - name: Install toolchain
+        run: rustup toolchain install && rustc --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run tests
+        run: cargo test --workspace
+
+      - name: Build WebAssembly package
+        run: bash scripts/netlify-build.sh
+
+  functions:
+    name: Report function tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-audit --no-fund
+      - run: npm test

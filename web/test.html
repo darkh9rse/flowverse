@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FlowVerse wasm test</title>
+<style>
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; background: #fff; color: #111; }
+  canvas { border: 1px solid #ccc; max-width: 100%; image-rendering: pixelated; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .pass { color: #0a7a2f; } .fail { color: #b00020; }
+  pre { background: #f4f4f4; padding: 8px; overflow-x: auto; }
+</style>
+</head>
+<body>
+<h1>FlowVerse wasm test</h1>
+<p>Makes two synthetic particle frames from a known Rankine vortex, then runs
+PIV, analysis and the flow-type fit in WebAssembly. Serve the <code>web/</code>
+folder over HTTP (e.g. <code>python3 -m http.server -d web</code>) and open
+<code>/test.html</code>.</p>
+
+<div class="row">
+  <figure><canvas id="frameA" width="256" height="256"></canvas><figcaption>Frame A</figcaption></figure>
+  <figure><canvas id="vectors" width="256" height="256"></canvas><figcaption>Measured vectors (×6)</figcaption></figure>
+</div>
+<ul id="checks"></ul>
+<pre id="out">Running…</pre>
+
+<script type="module" src="test.js"></script>
+</body>
+</html>

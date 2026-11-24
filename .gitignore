@@ -7,3 +7,14 @@ build/
 # Compiled files
 *.o
 *.out
+# Rust build output (created by cargo; `cargo clean` deletes it)
+target/
+
+# WebAssembly build output (rebuilt by scripts/netlify-build.sh)
+web/pkg/
+
+# Node dependencies for the report function
+node_modules/
+
+# Netlify local state
+.netlify/

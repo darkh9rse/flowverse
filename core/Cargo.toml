@@ -1,0 +1,8 @@
+[package]
+name = "flowverse-core"
+version = "0.1.0"
+edition = "2024"
+description = "PIV, flow analysis and potential-flow fitting for FlowVerse. No web code."
+
+[dependencies]
+rustfft = "6.4.1"

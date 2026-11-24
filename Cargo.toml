@@ -1,0 +1,16 @@
+# The Cargo *workspace*: one repository holding several Rust crates that are
+# built together and share one `Cargo.lock` and one `target/` folder.
+#
+# Members (see CLAUDE.md): core (physics), wasm (JavaScript bindings).
+[workspace]
+resolver = "3"
+members = ["core", "wasm"]
+
+# Release builds (used by wasm-pack): PIV is number crunching, so optimise
+# for speed. LTO ("link-time optimisation") lets the compiler optimise
+# across crates, e.g. inline rustfft into our loops; one codegen unit
+# optimises better at the cost of a slower build.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

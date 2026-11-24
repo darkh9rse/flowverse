@@ -1,0 +1,17 @@
+{
+  "name": "flowverse",
+  "private": true,
+  "description": "Measure fluid flow from phone videos with PIV in the browser.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test functions/"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.12.0",
+    "@netlify/blobs": "^11.1.9"
+  }
+}

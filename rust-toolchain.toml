@@ -1,0 +1,10 @@
+# Toolchain settings shared by local builds, CI and Netlify; rustup reads
+# this file automatically. "stable" (rather than an exact version like
+# "1.100.0") reuses the toolchain already installed instead of downloading
+# a second ~700 MB copy. Pin an exact version here if builds must be
+# bit-for-bit reproducible.
+[toolchain]
+channel = "stable"
+profile = "minimal"
+components = ["rustfmt"]
+targets = ["wasm32-unknown-unknown"]
