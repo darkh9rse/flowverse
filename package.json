@@ -8,7 +8,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "node --test functions/"
+    "test": "node --test \"functions/**/*.test.mjs\""
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.12.0",
