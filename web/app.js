@@ -240,6 +240,8 @@ const DEMO_FLOWS = {
   // horizontal channel nearly filling the frame, peak 1.5 px/frame.
   couette: { type: "couette", x: 0, y: 0, angle: 0, shear_rate: 0.01 },
   poiseuille: { type: "poiseuille", x: CX, y: CY, angle: 0, half_width: 120, max_speed: 1.5 },
+  // Top-hat jet: 140 px core, 12 px shear layers, still surroundings.
+  jet: { type: "jet", x: CX, y: CY, angle: 0, half_width: 70, shear_thickness: 12, max_speed: 1.0 },
 };
 
 $("demo-button").addEventListener("click", async () => {
@@ -510,7 +512,7 @@ function renderSummary(r) {
   }
 
   const fitRows = fit.fits
-    .map((f) => `<tr><td>${f.model}${f === best ? " ✓" : ""}</td><td>${f.r_squared.toFixed(3)}</td>
+    .map((f) => `<tr${f.ruled_out ? ` class="ruled-out" title="Ruled out: ${f.ruled_out}"` : ""}><td>${f.model}${f === best ? " ✓" : ""}${f.ruled_out ? " ✗" : ""}</td><td>${f.r_squared.toFixed(3)}</td>
       <td><span class="r2" style="width:${Math.round(100 * Math.max(0, f.r_squared))}px"></span></td></tr>`)
     .join("");
 
@@ -522,6 +524,7 @@ function renderSummary(r) {
       ${best ? `<h3>Best-fit parameters</h3><table>${rows(modelParameters(best, c))}</table>` : ""}
       <h3>Model comparison</h3>
       <table><tr><th>Model</th><th>R²</th><th></th></tr>${fitRows}</table>
+      ${fit.fits.filter((f) => f.ruled_out).map((f) => `<p class="source">✗ ${f.model} ruled out: ${f.ruled_out}.</p>`).join("")}
     </div>
     <div>
       <h3>Measurements</h3>
@@ -542,7 +545,7 @@ function renderSummary(r) {
 function modelLabel(f) {
   return {
     uniform: "a uniform flow", vortex: "a vortex", source: "a source", sink: "a sink", cylinder: "flow past a cylinder",
-    couette: "Couette (shear) flow", poiseuille: "Poiseuille (channel) flow",
+    couette: "Couette (shear) flow", poiseuille: "Poiseuille (channel) flow", jet: "a jet",
   }[f.model] ?? f.model;
 }
 
@@ -590,6 +593,18 @@ function modelParameters(f, c) {
         ["Peak speed", `${fmt(c.speed(p.max_speed))} ${c.speedUnit}`],
         ["Mean speed (⅔ peak)", `${fmt(c.speed((2 * p.max_speed) / 3))} ${c.speedUnit}`],
         ["Wall shear rate", `${fmt(c.rate((2 * p.max_speed) / p.half_width))} 1/s`],
+        ["Flow direction", direction(Math.cos(p.angle), Math.sin(p.angle))],
+      ];
+    case "jet":
+      return [
+        ["Jet width (2h)", `${fmt(c.length(2 * p.half_width))} ${c.lengthUnit}`],
+        ["Centreline through", `(${fmt(c.length(p.x))}, ${fmt(c.length(p.y))}) ${c.lengthUnit}`],
+        ["Core speed", `${fmt(c.speed(p.max_speed))} ${c.speedUnit}`],
+        ["Flow rate per depth (2hU)", `${fmt(c.area(2 * p.half_width * p.max_speed))} ${c.areaUnit}`],
+        ["Shear-layer thickness (2δ)", `${fmt(c.length(2 * p.shear_thickness))} ${c.lengthUnit}`],
+        ["Shear-layer vorticity", `${fmt(c.rate(p.max_speed / (2 * Math.max(p.shear_thickness, 1e-9))))} 1/s`],
+        // Michalke (1964): fastest-growing wave of a tanh shear layer.
+        ["Expected vortex spacing (≈14δ)", `${fmt(c.length(((2 * Math.PI) / 0.4446) * p.shear_thickness))} ${c.lengthUnit}`],
         ["Flow direction", direction(Math.cos(p.angle), Math.sin(p.angle))],
       ];
     default:

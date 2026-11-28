@@ -85,7 +85,12 @@ function show(out, text, note) {
 export function buildSummary(r) {
   const { analysis, fit, calib: c } = r;
   const st = analysis.stats;
-  const fits = fit.fits.map((f) => ({ model: f.model, r_squared: f.r_squared, parameters: physical(f, c) }));
+  const fits = fit.fits.map((f) => ({
+    model: f.model,
+    r_squared: f.r_squared,
+    parameters: physical(f, c),
+    ...(f.ruled_out ? { ruled_out: true } : {}),
+  }));
   const best = fit.best_index !== null ? fit.fits[fit.best_index] : null;
   return {
     version: 1,
@@ -148,6 +153,18 @@ function physical(f, c) {
         wall_shear_rate: c.rate((2 * p.max_speed) / p.half_width),
         direction_deg: directionDeg(Math.cos(p.angle), Math.sin(p.angle)),
       };
+    case "jet":
+      return {
+        jet_width: c.length(2 * p.half_width),
+        max_speed: c.speed(p.max_speed),
+        shear_thickness: c.length(p.shear_thickness),
+        // Flow rate per unit depth Q = 2hU (exact for this profile).
+        flow_rate: c.area(2 * p.half_width * p.max_speed),
+        shear_vorticity: c.rate(p.max_speed / (2 * Math.max(p.shear_thickness, 1e-9))),
+        // Fastest-growing Kelvin–Helmholtz wave ≈ 14.1 δ (Michalke 1964).
+        kh_wavelength: c.length(((2 * Math.PI) / 0.4446) * p.shear_thickness),
+        direction_deg: directionDeg(Math.cos(p.angle), Math.sin(p.angle)),
+      };
     default:
       return {};
   }
@@ -177,7 +194,7 @@ const ADVICE = {
 
 const NAMES = {
   uniform: "uniform flow", vortex: "vortex", source: "source", sink: "sink", cylinder: "cylinder",
-  couette: "Couette (shear) flow", poiseuille: "Poiseuille (channel) flow",
+  couette: "Couette (shear) flow", poiseuille: "Poiseuille (channel) flow", jet: "jet",
 };
 
 export function templateReport(s) {
@@ -198,6 +215,7 @@ export function templateReport(s) {
       cylinder: `The flow looks like a stream passing a round obstacle about ${n(p.radius)} ${L} in radius. Far from it the fluid moves at about ${n(p.stream_speed)} ${L}/s towards the ${words(p.direction_deg)}; it splits around the obstacle, speeds up at its sides and slows down in front and behind.`,
       couette: `The flow looks like Couette flow: layers of fluid sliding past each other, as between a still wall and a moving one, along a line ${n(p.axis_deg)}° from horizontal. The speed grows steadily with distance from the still wall, by about ${n(p.shear_rate)} ${L}/s for every ${L} (the shear rate, ${n(p.shear_rate)} per second). Viscosity passes the moving wall's motion through the fluid layer by layer, and the fluid touching each wall moves with it (the no-slip condition). This is one of the few exact solutions of the Navier–Stokes equations.`,
       poiseuille: `The flow looks like Poiseuille flow: fluid pushed along a channel about ${n(p.channel_width)} ${L} wide, towards the ${words(p.direction_deg)}. The speed profile across the channel is a parabola: fastest in the middle, about ${n(p.max_speed)} ${L}/s, and zero at both walls, where friction (viscosity) holds the fluid still. The average speed is two thirds of the peak, about ${n(p.mean_speed)} ${L}/s. A steady pressure drop along the channel balances the friction; this is an exact solution of the Navier–Stokes equations.`,
+      jet: `The flow looks like a jet: a stream of fluid about ${n(p.jet_width)} ${L} wide shooting towards the ${words(p.direction_deg)} through still surroundings, with no walls guiding it. Its core moves at up to about ${n(p.max_speed)} ${L}/s and carries about ${n(p.flow_rate)} ${L}²/s of fluid (per unit depth). At each edge is a shear layer about ${n(2 * p.shear_thickness)} ${L} thick, where the fast fluid rubs against the still fluid and spins (vorticity up to about ${n(p.shear_vorticity)} per second). Shear layers like these are unstable (the Kelvin–Helmholtz instability): ripples grow and roll up into vortices, typically about ${n(p.kh_wavelength)} ${L} apart.`,
       uniform: `Everything moves together in the same direction, towards the ${words(p.direction_deg)} at about ${n(p.speed)} ${L}/s.`,
     }[best.model];
     out.push(describe);
@@ -205,7 +223,7 @@ export function templateReport(s) {
     const r2 = best.r_squared ?? 0;
     const how = r2 >= 0.9 ? "very well" : r2 >= 0.7 ? "reasonably well" : r2 >= 0.5 ? "only roughly" : "poorly";
     const others = s.fits
-      .filter((f) => f !== best)
+      .filter((f) => f !== best && !f.ruled_out)
       .sort((a, b) => (b.r_squared ?? -1) - (a.r_squared ?? -1));
     const runnerUp = others[0];
     out.push(
@@ -213,6 +231,13 @@ export function templateReport(s) {
         (runnerUp ? ` The next best model, a ${NAMES[runnerUp.model]}, explains ${Math.round(100 * Math.max(0, runnerUp.r_squared ?? 0))} %.` : "") +
         ` ${Math.round(100 * (s.valid_fraction ?? 0))} % of the measured vectors passed the quality checks.`,
     );
+    for (const f of s.fits.filter((f) => f.ruled_out && (f.r_squared ?? 0) >= 0.5)) {
+      out.push(
+        f.model === "poiseuille"
+          ? `A channel-flow (Poiseuille) model also matches the numbers (${Math.round(100 * Math.max(0, f.r_squared ?? 0))} %), but it was ruled out: fluid keeps moving where its walls would have to be, so there are no walls.`
+          : `A ${NAMES[f.model] ?? f.model} model also matches the numbers but was ruled out as physically impossible here.`,
+      );
+    }
   }
 
   out.push(

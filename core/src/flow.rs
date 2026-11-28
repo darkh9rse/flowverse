@@ -345,6 +345,76 @@ impl FlowElement for Poiseuille {
     }
 }
 
+/// A plane jet: a stream of fluid shooting into still surroundings, with
+/// no walls (e.g. water from a slot nozzle into a tank).
+///
+/// The centreline passes through `(x, y)` at `angle` (same convention as
+/// [`Poiseuille`]). Across the jet, the speed along it is
+///
+/// ```text
+/// u(n) = U/2 · [ tanh((n + h)/δ) − tanh((n − h)/δ) ]
+/// ```
+///
+/// with `U = max_speed`, `h = half_width` and `δ = shear_thickness`. Each
+/// `tanh` is one **shear layer**: a thin zone, about 2δ thick, where the
+/// fast jet rubs against the still fluid. Between them the core moves at
+/// almost U when h ≫ δ (a "top-hat" jet, typical right after a nozzle).
+/// When δ is comparable to h the profile becomes a smooth bell, like a jet
+/// far downstream (the Bickley jet, u ∝ sech²).
+///
+/// This is a *model* profile (Michalke 1965), not an exact Navier–Stokes
+/// solution: a real jet slowly spreads and slows down as it mixes. Over
+/// the short stretch a video shows, it describes the shape well, and it
+/// gives useful numbers:
+/// - flow rate per unit depth Q = ∫u dn = 2hU, exactly, for any δ;
+/// - peak vorticity in the shear layers, U/(2δ) (for h ≫ δ);
+/// - the shear layers are unstable (Kelvin–Helmholtz): the fastest-growing
+///   ripples have wavelength ≈ 14.1 δ. They roll up into the vortices often
+///   seen along the edges of a jet.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Jet {
+    pub x: f64,
+    pub y: f64,
+    pub angle: f64,
+    pub half_width: f64,
+    pub shear_thickness: f64,
+    pub max_speed: f64,
+}
+
+/// Wavelength of the fastest-growing Kelvin–Helmholtz wave of a
+/// `tanh(n/δ)` shear layer, in units of δ: 2π / 0.4446 (Michalke 1964,
+/// temporal stability of the hyperbolic-tangent mixing layer).
+pub const KH_WAVELENGTH_PER_THICKNESS: f64 = 2.0 * PI / 0.4446;
+
+impl Jet {
+    /// Volume flow rate per unit depth, `2 h U`.
+    pub fn flow_rate(&self) -> f64 {
+        2.0 * self.half_width * self.max_speed
+    }
+
+    /// Largest vorticity magnitude in the shear layers, `U / (2δ)`
+    /// (accurate when the jet is much wider than its shear layers).
+    pub fn shear_layer_vorticity(&self) -> f64 {
+        self.max_speed / (2.0 * self.shear_thickness)
+    }
+
+    /// Expected spacing of the Kelvin–Helmholtz vortices, ≈ 14.1 δ.
+    pub fn kh_wavelength(&self) -> f64 {
+        KH_WAVELENGTH_PER_THICKNESS * self.shear_thickness
+    }
+}
+
+impl FlowElement for Jet {
+    fn velocity(&self, x: f64, y: f64) -> (f64, f64) {
+        let (n, c, s) = across_line(self.x, self.y, self.angle, x, y);
+        // δ → 0 is a sharp top-hat; keep it finite so we never divide by 0.
+        let d = self.shear_thickness.abs().max(1e-9);
+        let h = self.half_width;
+        let speed = 0.5 * self.max_speed * (((n + h) / d).tanh() - ((n - h) / d).tanh());
+        (speed * c, speed * s)
+    }
+}
+
 /// Superposition: a pair of flow elements is itself a flow element whose
 /// velocity is the sum. Pairs can be nested to combine more than two, e.g.
 /// `(Uniform {..}, (source, sink))`.
@@ -641,6 +711,41 @@ mod tests {
         }
         assert!(close(f.mean_speed(), 1.0, 1e-12));
         assert!(close(f.wall_shear_rate(), 0.075, 1e-12));
+    }
+
+    #[test]
+    fn jet_has_a_fast_core_shear_layers_and_still_surroundings() {
+        let angle = 0.25;
+        let jet = Jet {
+            x: 0.0,
+            y: 0.0,
+            angle,
+            half_width: 50.0,
+            shear_thickness: 5.0,
+            max_speed: 2.0,
+        };
+        let (s, c) = angle.sin_cos();
+        let along = |n: f64| {
+            let (u, v) = jet.velocity(-n * s, n * c);
+            u * c + v * s
+        };
+        // Core: essentially U. Shear layer centres (n = ±h): U/2. Far
+        // outside: still.
+        assert!(close(along(0.0), 2.0, 1e-6));
+        assert!(close(along(50.0), 1.0, 1e-3) && close(along(-50.0), 1.0, 1e-3));
+        assert!(close(along(120.0), 0.0, 1e-9));
+        // Flow rate: the integral of u across the jet is exactly 2hU.
+        let dn = 0.05;
+        let q: f64 = (-4000..4000).map(|i| along(i as f64 * dn) * dn).sum();
+        assert!(close(q, jet.flow_rate(), 1e-6), "Q = {q}");
+        assert!(close(jet.flow_rate(), 200.0, 1e-12));
+        // Steepest slope (= |vorticity|) at the shear layer: U/(2δ).
+        let slope = (along(50.0 - 0.01) - along(50.0 + 0.01)) / 0.02;
+        assert!(
+            close(slope, jet.shear_layer_vorticity(), 1e-4),
+            "slope {slope}"
+        );
+        assert!(close(jet.kh_wavelength(), 70.66, 0.01));
     }
 
     #[test]

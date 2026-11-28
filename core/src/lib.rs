@@ -8,7 +8,7 @@
 //! - [`flow`]: analytical potential-flow building blocks (the [`FlowElement`]
 //!   trait with [`Uniform`], [`Source`], [`Vortex`], [`Doublet`], plus
 //!   [`Cylinder`], and two exact viscous Navier–Stokes solutions,
-//!   [`Couette`] and [`Poiseuille`] channel flows).
+//!   [`Couette`] and [`Poiseuille`] channel flows, and a free [`Jet`]).
 //! - [`synthetic`]: makes fake particle images moved by a known flow, so the
 //!   PIV can be tested against an exact answer.
 //! - [`piv`]: particle image velocimetry (FFT cross-correlation, Gaussian
@@ -30,7 +30,7 @@ pub mod synthetic;
 
 // Re-export the most used types so callers can write
 // `flowverse_core::Image` instead of `flowverse_core::image::Image`.
-pub use flow::{Couette, Cylinder, Doublet, FlowElement, Poiseuille, Source, Uniform, Vortex};
+pub use flow::{Couette, Cylinder, Doublet, FlowElement, Jet, Poiseuille, Source, Uniform, Vortex};
 pub use image::Image;
 pub use piv::{PivConfig, Vector, VectorField, VectorStatus};
 pub use synthetic::ParticleImageConfig;

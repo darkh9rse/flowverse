@@ -139,6 +139,7 @@ body {
 .verdict { font-size: 1.15rem; }
 .verdict strong { color: var(--accent); }
 .r2 { display: inline-block; height: 8px; background: var(--accent); border-radius: 4px; vertical-align: middle; }
+.ruled-out td { opacity: 0.55; text-decoration: line-through; }
 
 .explain { margin-top: 16px; }
 .explain .report { white-space: pre-wrap; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }

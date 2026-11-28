@@ -26,7 +26,7 @@ use flowverse_core::analysis::{self, CriticalPointKind, FitReport, FlowModel};
 use flowverse_core::piv::{self, PivConfig};
 use flowverse_core::synthetic::{self, ParticleImageConfig};
 use flowverse_core::{
-    Couette, Cylinder, Doublet, FlowElement, Image, Poiseuille, Source, Uniform, Vector,
+    Couette, Cylinder, Doublet, FlowElement, Image, Jet, Poiseuille, Source, Uniform, Vector,
     VectorField, VectorStatus, Vortex,
 };
 use serde::Deserialize;
@@ -61,8 +61,8 @@ pub fn analyze_field(field: &str) -> Result<String, JsError> {
     analyze_field_json(field).map_err(|e| JsError::new(&e))
 }
 
-/// Fit uniform / vortex / source / cylinder / Couette / Poiseuille models
-/// to a field produced by [`run_piv`] and report the best one with R² scores.
+/// Fit uniform / vortex / source / cylinder / Couette / Poiseuille / jet
+/// models to a field produced by [`run_piv`] and report the best one with R² scores.
 #[wasm_bindgen]
 pub fn fit_flow(field: &str) -> Result<String, JsError> {
     fit_flow_json(field).map_err(|e| JsError::new(&e))
@@ -302,6 +302,8 @@ fn report_to_json(report: &FitReport) -> Value {
                 "model": f.model.name(),
                 "r_squared": f.r_squared,
                 "parameter_count": f.model.parameter_count(),
+                // null, or why this model is physically impossible here.
+                "ruled_out": f.ruled_out,
                 "parameters": model_parameters(&f.model),
             })
         })
@@ -331,6 +333,10 @@ fn model_parameters(model: &FlowModel) -> Value {
         FlowModel::Couette(f) => {
             json!({ "x": f.x, "y": f.y, "angle": f.angle, "shear_rate": f.shear_rate })
         }
+        FlowModel::Jet(f) => json!({
+            "x": f.x, "y": f.y, "angle": f.angle, "half_width": f.half_width,
+            "shear_thickness": f.shear_thickness, "max_speed": f.max_speed,
+        }),
         FlowModel::Poiseuille(f) => json!({
             "x": f.x, "y": f.y, "angle": f.angle,
             "half_width": f.half_width, "max_speed": f.max_speed,
@@ -386,6 +392,15 @@ enum FlowSpec {
         #[serde(default)]
         angle: f64,
         half_width: f64,
+        max_speed: f64,
+    },
+    Jet {
+        x: f64,
+        y: f64,
+        #[serde(default)]
+        angle: f64,
+        half_width: f64,
+        shear_thickness: f64,
         max_speed: f64,
     },
 }
@@ -453,6 +468,22 @@ impl FlowElement for FlowSpec {
                 y: y0,
                 angle,
                 half_width,
+                max_speed,
+            }
+            .velocity(x, y),
+            FlowSpec::Jet {
+                x: x0,
+                y: y0,
+                angle,
+                half_width,
+                shear_thickness,
+                max_speed,
+            } => Jet {
+                x: x0,
+                y: y0,
+                angle,
+                half_width,
+                shear_thickness,
                 max_speed,
             }
             .velocity(x, y),

@@ -1,6 +1,6 @@
 //! Which simple flow does the measurement look like?
 //!
-//! Six candidate models are fitted to the measured field by least squares
+//! Seven candidate models are fitted to the measured field by least squares
 //! (minimising the summed squared vector difference):
 //!
 //! | model      | parameters                                   | count |
@@ -11,10 +11,13 @@
 //! | source     | centre x, y; strength m; core rc             | 4     |
 //! | poiseuille | centreline position, angle; half-width; peak | 4     |
 //! | cylinder   | centre x, y; stream u, v; radius R           | 5     |
+//! | jet        | centreline position, angle; half-width;      | 5     |
+//! |            | shear-layer thickness; peak                  |       |
 //!
 //! The first four plus the cylinder are ideal (inviscid) flows; Couette and
 //! Poiseuille are viscous channel flows, exact Navier–Stokes solutions (see
-//! [`crate::flow::Couette`]). A line in the plane has two degrees of freedom
+//! [`crate::flow::Couette`]); the jet is a free stream with no walls (see
+//! [`crate::flow::Jet`]). A line in the plane has two degrees of freedom
 //! (position across it, and angle), which is why "wall position, angle"
 //! counts 2: sliding the line along itself changes nothing.
 //!
@@ -32,21 +35,40 @@
 //! measured with 32 px windows fits as R ≈ 28 px; with 16 px windows,
 //! R ≈ 34 px. Choose windows of about half the smallest feature or less.
 //!
+//! **Physically impossible fits are ruled out.** A good R² is not enough:
+//! a Poiseuille fit whose walls cross the measured area while fluid keeps
+//! moving behind them can't be a channel (nothing flows inside a solid
+//! wall). This is what tells a free jet from a channel when both profiles
+//! look alike. See `ruled_out_reason`. Ruled-out fits keep their R² in
+//! the report, with the reason, but can't be chosen as best (unless every
+//! model is ruled out).
+//!
 //! **Simpler models win ties.** A cylinder with radius → 0 is a uniform
 //! flow, so the cylinder can always match the uniform score. A model with
 //! fewer parameters is chosen if its R² is within [`SIMPLER_MODEL_MARGIN`]
-//! of the best (Occam's razor).
+//! of the best (Occam's razor), *and* it leaves at most
+//! [`SIMPLER_MODEL_RATIO`] times as much motion unexplained (plus a 0.1 %
+//! floor). The second condition matters when every fit is excellent: R²
+//! 0.984 vs 0.997 is a gap of only 0.013, but the simpler model misses five
+//! times more of the motion, so it is not really a tie.
 
 use std::f64::consts::PI;
 
 use super::gradient::{ScalarField, divergence, grid_spacing, vorticity};
 use super::least_squares::levenberg_marquardt;
-use crate::flow::{Couette, Cylinder, FlowElement, Poiseuille, Source, Uniform, Vortex};
+use crate::flow::{Couette, Cylinder, FlowElement, Jet, Poiseuille, Source, Uniform, Vortex};
 use crate::piv::{VectorField, VectorStatus};
 
 /// A model with fewer parameters is preferred if its R² is at most this
 /// much below the best.
 pub const SIMPLER_MODEL_MARGIN: f64 = 0.02;
+
+/// …and leaves at most this many times the best model's unexplained
+/// fraction (1 − R²), plus [`TIE_FLOOR`].
+pub const SIMPLER_MODEL_RATIO: f64 = 2.0;
+
+/// Differences in unexplained motion below 0.1 % are noise-level ties.
+const TIE_FLOOR: f64 = 0.001;
 
 /// A fitted model with its parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -57,6 +79,7 @@ pub enum FlowModel {
     Cylinder(Cylinder),
     Couette(Couette),
     Poiseuille(Poiseuille),
+    Jet(Jet),
 }
 
 impl FlowModel {
@@ -71,6 +94,7 @@ impl FlowModel {
             FlowModel::Cylinder(_) => "cylinder",
             FlowModel::Couette(_) => "couette",
             FlowModel::Poiseuille(_) => "poiseuille",
+            FlowModel::Jet(_) => "jet",
         }
     }
 
@@ -80,7 +104,7 @@ impl FlowModel {
             FlowModel::Uniform(_) => 2,
             FlowModel::Couette(_) => 3,
             FlowModel::Vortex(_) | FlowModel::Source(_) | FlowModel::Poiseuille(_) => 4,
-            FlowModel::Cylinder(_) => 5,
+            FlowModel::Cylinder(_) | FlowModel::Jet(_) => 5,
         }
     }
 }
@@ -96,6 +120,7 @@ impl FlowElement for FlowModel {
             FlowModel::Cylinder(f) => f.velocity(x, y),
             FlowModel::Couette(f) => f.velocity(x, y),
             FlowModel::Poiseuille(f) => f.velocity(x, y),
+            FlowModel::Jet(f) => f.velocity(x, y),
         }
     }
 }
@@ -106,12 +131,14 @@ pub struct ModelFit {
     pub model: FlowModel,
     /// Uncentred R² (see module docs). Can be negative for a terrible fit.
     pub r_squared: f64,
+    /// Why this model can't be the answer despite its R², if it can't.
+    pub ruled_out: Option<&'static str>,
 }
 
-/// All six fits plus the chosen best one.
+/// All seven fits plus the chosen best one.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FitReport {
-    /// In order: uniform, vortex, source, cylinder, couette, poiseuille.
+    /// In order: uniform, vortex, source, cylinder, couette, poiseuille, jet.
     pub fits: Vec<ModelFit>,
     /// Index into `fits` of the best model.
     pub best: usize,
@@ -133,7 +160,7 @@ struct Sample {
     v: f64,
 }
 
-/// Fit all six models to the field's valid vectors.
+/// Fit all seven models to the field's valid vectors.
 ///
 /// Returns `None` if there are fewer than 6 valid vectors, or if nothing
 /// moves (with no motion there is nothing to explain).
@@ -161,7 +188,7 @@ pub fn fit_flow_models(field: &VectorField) -> Option<FitReport> {
     // Each fit: starting parameters → least squares → turn into a model.
     // `Box<dyn Fn>` holds "some function", either a plain `fn` or a closure
     // that remembers (cx, cy); a plain `fn` pointer can't capture values.
-    let candidates: [(Vec<f64>, Box<dyn Fn(&[f64]) -> FlowModel>); 6] = [
+    let candidates: [(Vec<f64>, Box<dyn Fn(&[f64]) -> FlowModel>); 7] = [
         (guesses.uniform.to_vec(), Box::new(uniform_model)),
         (guesses.vortex.to_vec(), Box::new(vortex_model)),
         (guesses.source.to_vec(), Box::new(source_model)),
@@ -173,6 +200,10 @@ pub fn fit_flow_models(field: &VectorField) -> Option<FitReport> {
         (
             guesses.poiseuille.to_vec(),
             Box::new(move |p: &[f64]| poiseuille_model(cx, cy, p)),
+        ),
+        (
+            guesses.jet.to_vec(),
+            Box::new(move |p: &[f64]| jet_model(cx, cy, p)),
         ),
     ];
     let fits: Vec<ModelFit> = candidates
@@ -193,17 +224,32 @@ pub fn fit_flow_models(field: &VectorField) -> Option<FitReport> {
             ModelFit {
                 model,
                 r_squared: r_squared(&model, &samples, total),
+                ruled_out: ruled_out_reason(&model, &samples),
             }
         })
         .collect();
 
+    // Only physically possible models compete (all of them if none is).
+    let allowed: Vec<usize> = if fits.iter().all(|f| f.ruled_out.is_some()) {
+        (0..fits.len()).collect()
+    } else {
+        (0..fits.len())
+            .filter(|&i| fits[i].ruled_out.is_none())
+            .collect()
+    };
     // Highest R², then the simplest model within the margin of it.
-    let best_r2 = fits
+    let best_r2 = allowed
         .iter()
-        .map(|f| f.r_squared)
+        .map(|&i| fits[i].r_squared)
         .fold(f64::NEG_INFINITY, f64::max);
-    let best = (0..fits.len())
-        .filter(|&i| fits[i].r_squared >= best_r2 - SIMPLER_MODEL_MARGIN)
+    let best = allowed
+        .iter()
+        .copied()
+        .filter(|&i| {
+            let (miss, best_miss) = (1.0 - fits[i].r_squared, 1.0 - best_r2);
+            fits[i].r_squared >= best_r2 - SIMPLER_MODEL_MARGIN
+                && miss <= SIMPLER_MODEL_RATIO * best_miss + TIE_FLOOR
+        })
         // Fewest parameters first. For equal counts (vortex vs source) the
         // higher R² wins.
         .min_by(|&i, &j| {
@@ -220,6 +266,37 @@ pub fn fit_flow_models(field: &VectorField) -> Option<FitReport> {
         best,
         vector_count: samples.len(),
     })
+}
+
+/// Speed (px per frame) that counts as "really moving": about 4× the random
+/// error of PIV (≈ 0.06 px, see tests/piv_synthetic.rs). Fields here are
+/// PIV displacements in pixels, before any calibration.
+const MOVING_PX: f64 = 0.25;
+
+/// A physical reason the fitted `model` is impossible, or `None`.
+///
+/// Poiseuille flow needs solid walls at n = ±h. If at least 10 % of the
+/// vectors lie behind those walls (|n| > 1.1 h, a little margin for the
+/// PIV window blurring the wall) and the fluid there typically moves (median
+/// speed above [`MOVING_PX`] and above 2 % of the peak), there is no wall:
+/// the fit is describing something else, usually a free jet.
+fn ruled_out_reason(model: &FlowModel, samples: &[Sample]) -> Option<&'static str> {
+    let FlowModel::Poiseuille(p) = model else {
+        return None;
+    };
+    let (s, c) = p.angle.sin_cos();
+    let mut behind: Vec<f64> = samples
+        .iter()
+        .filter(|q| (-(q.x - p.x) * s + (q.y - p.y) * c).abs() > 1.1 * p.half_width)
+        .map(|q| q.u.hypot(q.v))
+        .collect();
+    if behind.len() * 10 < samples.len() {
+        return None; // walls at or beyond the edge of the picture
+    }
+    behind.sort_by(f64::total_cmp);
+    let median = behind[behind.len() / 2];
+    (median > MOVING_PX && median > 0.02 * p.max_speed.abs())
+        .then_some("fluid keeps moving beyond where the channel walls would be")
 }
 
 fn r_squared(model: &FlowModel, samples: &[Sample], total: f64) -> f64 {
@@ -306,6 +383,26 @@ fn poiseuille_model(cx: f64, cy: f64, p: &[f64]) -> FlowModel {
     })
 }
 
+/// p = [centreline offset n0 from (cx, cy), angle, half-width,
+/// shear-layer thickness, peak speed]. Same symmetry as Poiseuille: keep
+/// the peak positive.
+fn jet_model(cx: f64, cy: f64, p: &[f64]) -> FlowModel {
+    let (x, y) = point_across(cx, cy, p[1], p[0]);
+    let (angle, max_speed) = if p[4] < 0.0 {
+        (p[1] + PI, -p[4])
+    } else {
+        (p[1], p[4])
+    };
+    FlowModel::Jet(Jet {
+        x,
+        y,
+        angle: wrap(angle),
+        half_width: p[2].abs(),
+        shear_thickness: p[3].abs(),
+        max_speed,
+    })
+}
+
 /// Starting points for the fits, read from the data.
 ///
 /// Nonlinear least squares only finds the *nearest* minimum, so a good start
@@ -323,6 +420,7 @@ struct Guesses {
     cylinder: [f64; 5],
     couette: [f64; 3],
     poiseuille: [f64; 4],
+    jet: [f64; 5],
     /// Centroid of the vectors: the reference point for the channel lines.
     middle: [f64; 2],
 }
@@ -370,6 +468,11 @@ impl Guesses {
         };
 
         let (couette, poiseuille) = channel_guesses(samples, cx, cy, h);
+        // Jet: start from the parabola. A parabola of half-width hp drops to
+        // half its peak at hp/√2, which is where a jet's shear layers sit;
+        // start with fairly thick shear layers and let the fit sharpen them.
+        let [n0, angle, hp, peak] = poiseuille;
+        let jet = [n0, angle, hp / 2f64.sqrt(), 0.25 * hp, peak];
 
         Guesses {
             uniform: [mean_u, mean_v],
@@ -378,6 +481,7 @@ impl Guesses {
             cylinder,
             couette,
             poiseuille,
+            jet,
             middle: [cx, cy],
         }
     }
@@ -666,6 +770,85 @@ mod tests {
             let gap = -(p.x - 120.0) * angle.sin() + (p.y - 122.0) * angle.cos();
             assert!(gap.abs() < 0.5, "centreline {gap} px off");
         }
+    }
+
+    #[test]
+    fn exact_jet_is_identified_and_not_called_a_channel() {
+        // A top-hat jet: 120 px wide core, 8 px shear layers, still fluid
+        // above and below it inside the 240 px field.
+        let truth = Jet {
+            x: 120.0,
+            y: 118.0,
+            angle: 0.1,
+            half_width: 60.0,
+            shear_thickness: 8.0,
+            max_speed: 1.6,
+        };
+        let r = fit(&truth);
+        assert_eq!(r.best().model.name(), "jet", "{r:?}");
+        assert!(r.best().r_squared > 0.999, "{r:?}");
+        let FlowModel::Jet(j) = r.best().model else {
+            unreachable!()
+        };
+        assert!((j.angle - 0.1).abs() < 1e-3, "{j:?}");
+        assert!(
+            (j.half_width - 60.0).abs() < 0.5 && (j.shear_thickness - 8.0).abs() < 0.5,
+            "{j:?}"
+        );
+        assert!((j.max_speed - 1.6).abs() < 0.01, "{j:?}");
+        // And a real channel flow is still a channel (Poiseuille has one
+        // parameter fewer, so it wins a near-tie).
+        let r = fit(&Poiseuille {
+            x: 120.0,
+            y: 122.0,
+            angle: 0.0,
+            half_width: 90.0,
+            max_speed: 1.4,
+        });
+        assert_eq!(r.best().model.name(), "poiseuille", "{r:?}");
+    }
+
+    #[test]
+    fn a_channel_with_fluid_moving_behind_its_walls_is_ruled_out() {
+        // Horizontal channel, walls at y = 60 and y = 140.
+        let channel = FlowModel::Poiseuille(Poiseuille {
+            x: 0.0,
+            y: 100.0,
+            angle: 0.0,
+            half_width: 40.0,
+            max_speed: 10.0,
+        });
+        // Vectors every 10 px from y = 0 to 200; inside the channel they
+        // follow the parabola. Behind the walls: still, or moving at 0.6.
+        let samples = |behind: f64| -> Vec<Sample> {
+            (0..=20)
+                .map(|k| {
+                    let y = k as f64 * 10.0;
+                    let n: f64 = y - 100.0;
+                    let u = if n.abs() < 40.0 {
+                        10.0 * (1.0 - (n / 40.0).powi(2))
+                    } else {
+                        behind
+                    };
+                    Sample {
+                        x: 0.0,
+                        y,
+                        u,
+                        v: 0.0,
+                    }
+                })
+                .collect()
+        };
+        assert_eq!(ruled_out_reason(&channel, &samples(0.0)), None);
+        assert_eq!(
+            ruled_out_reason(&channel, &samples(0.05)),
+            None,
+            "PIV noise only"
+        );
+        assert!(ruled_out_reason(&channel, &samples(0.6)).is_some());
+        // Other models are never ruled out by this check.
+        let uniform = FlowModel::Uniform(Uniform { u: 1.0, v: 0.0 });
+        assert_eq!(ruled_out_reason(&uniform, &samples(0.6)), None);
     }
 
     #[test]

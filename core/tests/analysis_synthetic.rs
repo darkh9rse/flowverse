@@ -13,8 +13,8 @@ use flowverse_core::analysis::{
 use flowverse_core::piv::analyze;
 use flowverse_core::synthetic::generate_pair;
 use flowverse_core::{
-    Couette, Cylinder, FlowElement, ParticleImageConfig, PivConfig, Poiseuille, Source, Uniform,
-    VectorField, Vortex,
+    Couette, Cylinder, FlowElement, Jet, ParticleImageConfig, PivConfig, Poiseuille, Source,
+    Uniform, VectorField, Vortex,
 };
 
 const CENTRE: f64 = 127.5;
@@ -232,6 +232,56 @@ fn measured_poiseuille_flow_is_analysed() {
     // The derived physics follows: mean speed 2U/3, wall shear rate 2U/h.
     assert!((p.mean_speed() - 1.0).abs() < 0.03);
     assert!((p.wall_shear_rate() - 3.0 / 110.0).abs() < 0.1 * 3.0 / 110.0);
+}
+
+#[test]
+fn measured_jet_is_analysed() {
+    // A near-nozzle "top-hat" jet: 140 px wide core, 12 px shear layers,
+    // peak 1 px/frame. Steepest change U/(2δ) ≈ 0.042 px/frame per px, so
+    // 1.3 px across a window (gradient rule OK).
+    //
+    // Note: a jet with *thick* shear layers (δ comparable to h) is a smooth
+    // bell, almost a parabola. From velocities alone it is then nearly
+    // indistinguishable from Poiseuille flow, and the simpler-model rule
+    // picks Poiseuille. Sharp shear layers are what give a jet away.
+    let truth = Jet {
+        x: CENTRE,
+        y: CENTRE,
+        angle: 0.0,
+        half_width: 70.0,
+        shear_thickness: 12.0,
+        max_speed: 1.0,
+    };
+    // 16 px windows resolve the 12 px shear layers; 32 px windows smear
+    // them to ~18 px, the profile looks like a parabola, and (with still
+    // surroundings, so no wall check can object) Poiseuille wins the tie.
+    let (a, b) = generate_pair(&truth, &ParticleImageConfig::default());
+    let cfg = PivConfig {
+        window_size: 16,
+        step: 8,
+        ..PivConfig::default()
+    };
+    let field = analyze(&a, &b, &cfg).unwrap();
+    let report = fit_flow_models(&field).unwrap();
+    print_report(&report);
+    let FlowModel::Jet(j) = report.best().model else {
+        panic!("best fit is not a jet")
+    };
+    assert!(report.best().r_squared > 0.98);
+    assert!((j.max_speed - 1.0).abs() < 0.04, "{j:?}");
+    assert!((j.half_width - 70.0).abs() < 3.0, "{j:?}");
+    // 32 px PIV windows average across the shear layer and make it look
+    // thicker than it is; allow for that.
+    assert!(
+        j.shear_thickness > 10.0 && j.shear_thickness < 18.0,
+        "{j:?}"
+    );
+    // The flow rate 2hU does not depend on δ, so it survives the blur.
+    assert!(
+        (j.flow_rate() - 140.0).abs() < 0.05 * 140.0,
+        "Q = {}",
+        j.flow_rate()
+    );
 }
 
 fn print_report(r: &flowverse_core::analysis::FitReport) {
