@@ -2,6 +2,10 @@
 
 Measure fluid flow from an ordinary phone video.
 
+**Try it: [flowversse.netlify.app](https://flowversse.netlify.app)**. It
+runs in any modern browser with nothing to install, and has built-in demos
+if you have no video yet.
+
 FlowVerse turns two frames of a video of moving fluid into a velocity field
 using **particle image velocimetry (PIV)**, then analyses it: vorticity,
 divergence, critical points (vortex centres, saddles, sources, sinks), and
@@ -84,6 +88,25 @@ features smaller than about two windows are blurred. A 35 px cylinder
 measured with 32 px windows fits as ~28 px; with 16 px windows, ~34 px. The
 velocity should also change by less than ~5 % of the window size across one
 window, so very tight, fast vortices need smaller windows or closer frames.
+
+## Fluid mechanics behind it
+
+FlowVerse started as an additional project for a Fluid Dynamics course. It
+applies the course material to measured data instead of textbook formulas:
+
+| Course topic | Where it appears in FlowVerse |
+|---|---|
+| Eulerian description, velocity field | PIV turns two frames into a velocity field **V**(x, y) on a grid |
+| Pathlines | Animated tracer particles are moved through the measured field |
+| Vorticity, rotational vs irrotational flow | Vorticity map ω = ∂v/∂x − ∂u/∂y, red and blue where the fluid spins |
+| Continuity, incompressibility | Divergence ∂u/∂x + ∂v/∂y as a check: near zero for a 2-D incompressible flow |
+| Potential flow and superposition | Uniform stream, source/sink and vortex fitted to the data; flow past a cylinder as uniform stream + doublet |
+| Stagnation points | Critical points located and classified (vortex centre, saddle, source, sink) |
+| Exact viscous solutions | Couette (linear shear) and plane Poiseuille (parabolic) profiles fitted, with a check that the implied walls are physically possible |
+| Free shear flows | Jet model with a fast core and two shear layers |
+
+Each model is tested against its analytical solution, using synthetic
+particle images made from that exact flow (`cargo test`).
 
 ## How it works
 
