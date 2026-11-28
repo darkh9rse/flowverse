@@ -38,9 +38,12 @@ function. The page shows exactly what will be sent.
 - **Light it brightly and evenly**, without glare spots. Bright light also
   means short exposures and sharp, unblurred particles.
 - **Use the highest frame rate** available (slow-motion modes are great).
-- Between frames A and B, particles should move **a few pixels**, and no more
-  than a quarter of the analysis window (8 px for the default 32 px window).
-  Choose frames further apart for slow flow, closer together for fast flow.
+- Between frames A and B, particles should move **a few pixels to about 20
+  px**. FlowVerse first measures with large windows and then refines with
+  small ones (multi-pass PIV), so with the default 32 px window it can
+  follow motions up to about a window size (32 px) if the video is large
+  enough. Below ~0.5 px, noise dominates. Choose frames further apart for
+  slow flow, closer together for fast flow.
 - **Put a ruler in view** at the same distance as the flow, for calibration.
 - If your phone's video won't open, record in "Most Compatible" / H.264
   instead of HEVC.

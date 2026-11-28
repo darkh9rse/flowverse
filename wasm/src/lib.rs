@@ -40,7 +40,7 @@ use wasm_bindgen::prelude::*;
 /// Run PIV on two frames of RGBA bytes (e.g. `ImageData.data` from a canvas).
 ///
 /// `options` is JSON with any of `window_size`, `step`, `median_threshold`,
-/// `median_epsilon`; missing ones use the defaults. Pass `"{}"` for all
+/// `median_epsilon`, `multi_pass`; missing ones use the defaults. Pass `"{}"` for all
 /// defaults. Returns the vector field as JSON (see [`field_to_json`]).
 #[wasm_bindgen]
 pub fn run_piv(
@@ -93,6 +93,7 @@ struct PivOptions {
     step: Option<usize>,
     median_threshold: Option<f32>,
     median_epsilon: Option<f32>,
+    multi_pass: Option<bool>,
 }
 
 pub fn run_piv_json(
@@ -112,6 +113,7 @@ pub fn run_piv_json(
         step: opts.step.unwrap_or((window_size / 2).max(1)),
         median_threshold: opts.median_threshold.unwrap_or(d.median_threshold),
         median_epsilon: opts.median_epsilon.unwrap_or(d.median_epsilon),
+        multi_pass: opts.multi_pass.unwrap_or(d.multi_pass),
     };
     let img_a = Image::from_rgba8(width, height, a).map_err(|e| format!("frame A: {e}"))?;
     let img_b = Image::from_rgba8(width, height, b).map_err(|e| format!("frame B: {e}"))?;

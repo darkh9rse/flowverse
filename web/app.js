@@ -332,7 +332,7 @@ async function analyze() {
     );
     const calib = calibration(pxScale, dt);
     state.last = { ...result, frame: imgA, calib, frames, width: w, height: h };
-    const warnings = [...notes, ...resultWarnings(result, windowSize)];
+    const warnings = [...notes, ...resultWarnings(result, windowSize, Math.min(w, h))];
     state.last.warnings = warnings;
     showResults(state.last, warnings);
     setStatus(`Done in ${Math.round(result.ms)} ms.`);
@@ -411,7 +411,16 @@ function imageWarnings(imgA, imgB, width) {
   return out;
 }
 
-function resultWarnings({ field, analysis, fit }, windowSize) {
+/** Largest displacement the multi-pass PIV can follow: a quarter of its
+ * coarsest window. The core tries windows 4× and 2× the chosen size,
+ * keeping those that fit at least twice into the shorter image side
+ * (see `analyze` in core/src/piv.rs). */
+function maxTrackable(windowSize, shortSide) {
+  const coarsest = [4, 2, 1].map((k) => k * windowSize).find((w) => w === windowSize || 2 * w <= shortSide);
+  return coarsest / 4;
+}
+
+function resultWarnings({ field, analysis, fit }, windowSize, shortSide) {
   const out = [];
   const st = analysis.stats;
   const speeds = [];
@@ -423,8 +432,9 @@ function resultWarnings({ field, analysis, fit }, windowSize) {
   } else if (st.valid_fraction < 0.85) {
     out.push({ code: "some_rejected", level: "warn", text: `${pct(1 - st.valid_fraction)} of vectors were rejected (red crosses). Results there are filled in from neighbours only.` });
   }
-  if (p95 > windowSize / 4) {
-    out.push({ code: "too_fast", level: "warn", text: `Particles move up to ${p95.toFixed(1)} px between frames, more than a quarter of the ${windowSize} px window. Pick frames closer together, or a larger window.` });
+  const limit = maxTrackable(windowSize, shortSide);
+  if (p95 > 0.8 * limit) {
+    out.push({ code: "too_fast", level: "warn", text: `Particles move up to ${p95.toFixed(1)} px between frames, close to the ~${Math.round(limit)} px this analysis can follow. Pick frames closer together, or a larger window.` });
   }
   if (p95 < 0.05) {
     out.push({ code: "no_motion", level: "bad", text: "Almost no motion detected. Is the fluid moving? Try frames further apart." });

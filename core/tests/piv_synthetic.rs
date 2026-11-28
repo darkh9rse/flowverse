@@ -163,3 +163,47 @@ fn loop_circulation(field: &VectorField, lo: usize, hi: usize) -> f64 {
     }
     total
 }
+
+#[test]
+fn large_displacement_needs_multi_pass() {
+    // 13.4 px right, 9.7 px up: 16.5 px in total, about half a 32 px
+    // window, twice the "quarter rule" limit of single-pass PIV.
+    let flow = Uniform { u: 13.4, v: -9.7 };
+    let img_cfg = ParticleImageConfig {
+        // Seed particles well outside the frame so ones moving in from the
+        // edge exist in frame B too.
+        margin: 30.0,
+        ..ParticleImageConfig::default()
+    };
+    let (a, b) = generate_pair(&flow, &img_cfg);
+
+    // Single pass: a third of each window's particles leave it, so the peak
+    // is weaker and noisier. On these clean synthetic images it degrades
+    // (≈0.17 px RMS, ≈10 % outliers); on real, compressed video at the same
+    // shift it collapsed completely (see core/examples/piv_frames.rs).
+    let single = PivConfig {
+        multi_pass: false,
+        ..PivConfig::default()
+    };
+    let field = analyze(&a, &b, &single).unwrap();
+    let (rms1, _, valid1) = error_stats(&field, &flow, img_cfg.dt);
+    println!(
+        "single pass: rms {rms1:.3} px, valid {:.1}%",
+        valid1 * 100.0
+    );
+
+    // Multi-pass (the default): coarse windows predict the shift, the final
+    // windows are offset by it, and the accuracy is that of a small shift.
+    let field = analyze(&a, &b, &PivConfig::default()).unwrap();
+    let (rms, max_err, valid) = error_stats(&field, &flow, img_cfg.dt);
+    println!(
+        "multi-pass: rms {rms:.3} px, max {max_err:.3} px, valid {:.1}%",
+        valid * 100.0
+    );
+    assert!(
+        valid1 < 0.95 && rms < 0.5 * rms1,
+        "multi-pass should clearly beat single pass"
+    );
+    assert!(valid > 0.95, "only {:.1}% valid", valid * 100.0);
+    assert!(rms < 0.1, "RMS error {rms} px too large");
+}

@@ -20,6 +20,17 @@
 //!    compared with the median of its 8 neighbours and flagged as an outlier
 //!    if it is too far off.
 //!
+//! **Multi-pass with window offset** (Westerweel, Dabiri & Gharib 1997).
+//! A single pass only works while particles move less than about a quarter
+//! of the window: further than that, most particles leave the window
+//! between frames and the correlation peak drowns in noise. So by default
+//! [`analyze`] first runs coarse passes with 2× and 4× larger windows,
+//! which can follow large motions. Their result *predicts* each small
+//! window's displacement. The final pass then takes frame B's window from
+//! the predicted place, so the correlation only has to find the small
+//! leftover error. A 32 px window can then measure motions of 20 px or
+//! more while keeping its fine spatial detail. See [`analyze`].
+//!
 //! Reference: Raffel et al., *Particle Image Velocimetry: A Practical Guide*.
 
 use std::fmt;
@@ -49,6 +60,11 @@ pub struct PivConfig {
     /// (~0.1 px) and stops tiny, perfectly smooth fields from flagging
     /// everything because of a near-zero median residual.
     pub median_epsilon: f32,
+    /// Run coarse predictor passes and offset the final windows by their
+    /// result (see the module docs). Costs a few times the single-pass time
+    /// and allows displacements of a window size or more. `false` gives
+    /// classic single-pass PIV.
+    pub multi_pass: bool,
 }
 
 impl Default for PivConfig {
@@ -58,6 +74,7 @@ impl Default for PivConfig {
             step: 16,
             median_threshold: 2.0,
             median_epsilon: 0.1,
+            multi_pass: true,
         }
     }
 }
@@ -163,8 +180,20 @@ impl fmt::Display for PivError {
 
 impl std::error::Error for PivError {}
 
-/// Run PIV on a frame pair: correlate every window, then apply the
-/// normalized median test.
+/// Run PIV on a frame pair and apply the normalized median test.
+///
+/// With `cfg.multi_pass` (the default) this is a coarse-to-fine scheme:
+///
+/// 1. Coarse passes with windows 4× and 2× larger than `window_size` (only
+///    those that fit at least twice into the image), each predicted by the
+///    one before it.
+/// 2. The final pass at `window_size`, offset by the 2× pass.
+/// 3. The final pass once more, offset by its own (cleaned) result. This
+///    catches windows whose coarse prediction was poor, e.g. in thin
+///    shear layers that a big window blurs.
+///
+/// Between passes, outliers are replaced by the median of their neighbours
+/// so one bad vector can't misplace the next pass's window.
 pub fn analyze(a: &Image, b: &Image, cfg: &PivConfig) -> Result<VectorField, PivError> {
     if a.width() != b.width() || a.height() != b.height() {
         return Err(PivError::SizeMismatch);
@@ -176,28 +205,91 @@ pub fn analyze(a: &Image, b: &Image, cfg: &PivConfig) -> Result<VectorField, Piv
     if a.width() < n || a.height() < n {
         return Err(PivError::ImageTooSmall);
     }
+    if !cfg.multi_pass {
+        return Ok(single_pass(a, b, cfg, None));
+    }
 
+    // Coarse window sizes, largest first: 4n, 2n (those that fit twice).
+    let fits = |w: usize| 2 * w <= a.width().min(a.height());
+    let coarse: Vec<usize> = [4 * n, 2 * n].into_iter().filter(|&w| fits(w)).collect();
+
+    let mut predictor: Option<VectorField> = None;
+    for &w in &coarse {
+        let level = PivConfig {
+            window_size: w,
+            step: w / 2,
+            ..*cfg
+        };
+        let mut field = single_pass(a, b, &level, predictor.as_ref());
+        replace_outliers(&mut field);
+        predictor = Some(field);
+    }
+    // Final size, then once more with its own result as the predictor.
+    let mut field = single_pass(a, b, cfg, predictor.as_ref());
+    let mut cleaned = field.clone();
+    replace_outliers(&mut cleaned);
+    field = single_pass(a, b, cfg, Some(&cleaned));
+    Ok(field)
+}
+
+/// One correlation pass over the whole grid, then the median test.
+///
+/// With a `predictor` field, each window pair is offset by the predicted
+/// displacement, rounded to whole pixels and split evenly between the two
+/// frames: A's window moves back by half, B's forward by half (a
+/// "central difference", which measures the velocity at the window centre
+/// rather than at A's position). The measured result is that offset plus
+/// the small sub-pixel remainder the correlation finds.
+fn single_pass(
+    a: &Image,
+    b: &Image,
+    cfg: &PivConfig,
+    predictor: Option<&VectorField>,
+) -> VectorField {
+    let n = cfg.window_size;
     // Number of windows that fit completely inside the image.
     let cols = (a.width() - n) / cfg.step + 1;
     let rows = (a.height() - n) / cfg.step + 1;
+    // Largest allowed top-left corner, so a window stays inside the image.
+    let max_x = (a.width() - n) as i64;
+    let max_y = (a.height() - n) as i64;
 
     let mut correlator = Correlator::new(n);
     let mut vectors = Vec::with_capacity(cols * rows);
     for row in 0..rows {
         for col in 0..cols {
-            let x0 = col * cfg.step;
-            let y0 = row * cfg.step;
+            let x0 = (col * cfg.step) as i64;
+            let y0 = (row * cfg.step) as i64;
             // The window covers pixels x0 ..= x0+n-1. Pixel centres sit on
             // whole numbers, so its centre is at x0 + (n-1)/2.
             let centre = (n as f32 - 1.0) / 2.0;
             let x = x0 as f32 + centre;
             let y = y0 as f32 + centre;
-            let vector = match correlator.displacement(a, b, x0, y0) {
+
+            // Integer offset (dx, dy) from the predictor, split between the
+            // frames. `clamp` keeps both windows inside the image; near an
+            // edge that shrinks the offset, so we use the offset actually
+            // applied (bx − ax), not the one we wanted.
+            let (dx, dy) = predictor.map_or((0, 0), |p| {
+                let (pu, pv) = interpolate(p, x, y);
+                (pu.round() as i64, pv.round() as i64)
+            });
+            let ax = (x0 - dx.div_euclid(2)).clamp(0, max_x);
+            let ay = (y0 - dy.div_euclid(2)).clamp(0, max_y);
+            let bx = (ax + dx).clamp(0, max_x);
+            let by = (ay + dy).clamp(0, max_y);
+
+            let vector = match correlator.displacement(
+                a,
+                (ax as usize, ay as usize),
+                b,
+                (bx as usize, by as usize),
+            ) {
                 Some((u, v)) => Vector {
                     x,
                     y,
-                    u,
-                    v,
+                    u: u + (bx - ax) as f32,
+                    v: v + (by - ay) as f32,
                     status: VectorStatus::Valid,
                 },
                 None => Vector {
@@ -218,7 +310,79 @@ pub fn analyze(a: &Image, b: &Image, cfg: &PivConfig) -> Result<VectorField, Piv
         vectors,
     };
     normalized_median_test(&mut field, cfg.median_threshold, cfg.median_epsilon);
-    Ok(field)
+    field
+}
+
+/// Displacement of `field` at `(x, y)` by bilinear interpolation between
+/// the four surrounding grid points (clamped at the grid's edges).
+///
+/// Assumes a regular grid, which every field from [`analyze`] is; spacing
+/// and origin are read from the first vectors.
+fn interpolate(field: &VectorField, x: f32, y: f32) -> (f32, f32) {
+    let first = field.vectors[0];
+    let sx = if field.cols > 1 {
+        field.vectors[1].x - first.x
+    } else {
+        1.0
+    };
+    let sy = if field.rows > 1 {
+        field.vectors[field.cols].y - first.y
+    } else {
+        1.0
+    };
+    // Fractional grid coordinates of (x, y).
+    let gx = ((x - first.x) / sx).clamp(0.0, (field.cols - 1) as f32);
+    let gy = ((y - first.y) / sy).clamp(0.0, (field.rows - 1) as f32);
+    let (c0, r0) = (gx.floor() as usize, gy.floor() as usize);
+    let (c1, r1) = ((c0 + 1).min(field.cols - 1), (r0 + 1).min(field.rows - 1));
+    let (fx, fy) = (gx - c0 as f32, gy - r0 as f32);
+    let at = |c: usize, r: usize| field.get(c, r);
+    let lerp = |p: f32, q: f32, t: f32| p + (q - p) * t;
+    let u = lerp(
+        lerp(at(c0, r0).u, at(c1, r0).u, fx),
+        lerp(at(c0, r1).u, at(c1, r1).u, fx),
+        fy,
+    );
+    let v = lerp(
+        lerp(at(c0, r0).v, at(c1, r0).v, fx),
+        lerp(at(c0, r1).v, at(c1, r1).v, fx),
+        fy,
+    );
+    (u, v)
+}
+
+/// Give every non-valid vector the median of its valid neighbours (3×3),
+/// so a predictor field has no holes or spikes. Vectors with no valid
+/// neighbour get zero. Statuses are kept; only `u` and `v` change.
+fn replace_outliers(field: &mut VectorField) {
+    let (cols, rows) = (field.cols, field.rows);
+    let original = field.vectors.clone();
+    let (mut nu, mut nv) = (Vec::with_capacity(8), Vec::with_capacity(8));
+    for row in 0..rows {
+        for col in 0..cols {
+            if original[row * cols + col].status == VectorStatus::Valid {
+                continue;
+            }
+            nu.clear();
+            nv.clear();
+            for r in row.saturating_sub(1)..=(row + 1).min(rows - 1) {
+                for c in col.saturating_sub(1)..=(col + 1).min(cols - 1) {
+                    let n = original[r * cols + c];
+                    if n.status == VectorStatus::Valid {
+                        nu.push(n.u);
+                        nv.push(n.v);
+                    }
+                }
+            }
+            let (u, v) = if nu.is_empty() {
+                (0.0, 0.0)
+            } else {
+                (median(&mut nu), median(&mut nv))
+            };
+            field.vectors[row * cols + col].u = u;
+            field.vectors[row * cols + col].v = v;
+        }
+    }
 }
 
 /// Flag vectors that disagree with their neighbours (Westerweel & Scarano 2005).
@@ -333,12 +497,20 @@ impl Correlator {
         }
     }
 
-    /// Sub-pixel displacement of the window whose top-left pixel is
-    /// `(x0, y0)`, or `None` if there is no usable peak.
-    fn displacement(&mut self, a: &Image, b: &Image, x0: usize, y0: usize) -> Option<(f32, f32)> {
+    /// Sub-pixel displacement between A's window with top-left pixel
+    /// `a_at` and B's window at `b_at`, measured from B's window position
+    /// (so add `b_at − a_at` for the total). `None` if there is no usable
+    /// peak.
+    fn displacement(
+        &mut self,
+        a: &Image,
+        a_at: (usize, usize),
+        b: &Image,
+        b_at: (usize, usize),
+    ) -> Option<(f32, f32)> {
         let n = self.n;
-        load_window(a, x0, y0, n, &mut self.buf_a);
-        load_window(b, x0, y0, n, &mut self.buf_b);
+        load_window(a, a_at.0, a_at.1, n, &mut self.buf_a);
+        load_window(b, b_at.0, b_at.1, n, &mut self.buf_b);
 
         fft2d(&mut self.buf_a, n, &*self.forward);
         fft2d(&mut self.buf_b, n, &*self.forward);
@@ -517,7 +689,9 @@ mod tests {
             ..Default::default()
         };
         let (a, b) = generate_pair(&Uniform { u: 3.0, v: -2.0 }, &cfg);
-        let (u, v) = Correlator::new(32).displacement(&a, &b, 16, 16).unwrap();
+        let (u, v) = Correlator::new(32)
+            .displacement(&a, (16, 16), &b, (16, 16))
+            .unwrap();
         // One window has ~0.05 px random error (see tests/piv_synthetic.rs
         // for the accuracy tests). Here we only need to rule out an
         // integer-pixel or sign mistake.
@@ -530,7 +704,10 @@ mod tests {
     #[test]
     fn blank_window_has_no_peak() {
         let img = Image::new(16, 16);
-        assert_eq!(Correlator::new(16).displacement(&img, &img, 0, 0), None);
+        assert_eq!(
+            Correlator::new(16).displacement(&img, (0, 0), &img, (0, 0)),
+            None
+        );
     }
 
     /// Build a smooth field (u = 1, v = 0.5) with one spike.
