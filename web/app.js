@@ -182,6 +182,26 @@ $("scrub").addEventListener("input", (e) => showFrame(parseInt(e.target.value, 1
 $("prev-frame").addEventListener("click", () => showFrame(wantedFrame - 1));
 $("next-frame").addEventListener("click", () => showFrame(wantedFrame + 1));
 
+/** Frames for the background estimate: BACKGROUND_FRAMES frames spread
+ * evenly over about one second before A to one second after B, as RGBA at
+ * the analysis size, back to back. Returns null for very short videos.
+ * Moves the video around, so it puts it back on frame A afterwards. */
+const BACKGROUND_FRAMES = 15;
+async function sampleBackground(ia, ib, w, h) {
+  const span = Math.round(fps());
+  const first = Math.max(0, ia - span), last = Math.min(state.frameCount - 1, ib + span);
+  if (last - first + 1 < 5) return null;
+  const n = Math.min(BACKGROUND_FRAMES, last - first + 1);
+  const frames = new Uint8Array(n * w * h * 4);
+  for (let k = 0; k < n; k++) {
+    setStatus(`Sampling the background (${k + 1}/${n})…`);
+    await showFrame(Math.round(first + (k * (last - first)) / (n - 1)));
+    frames.set(toImageData(grabFrame().canvas, w, h).data, k * w * h * 4);
+  }
+  await showFrame(ia);
+  return { frames: frames.buffer, count: n };
+}
+
 function grabFrame() {
   const c = document.createElement("canvas");
   c.width = video.videoWidth;
@@ -327,11 +347,18 @@ async function analyze() {
     // still need frame A for drawing).
     const a = imgA.data.slice().buffer;
     const b = imgB.data.slice().buffer;
+    const transfer = [a, b];
+    let background = null;
+    if (state.source === "video" && $("bg-remove").checked) {
+      background = await sampleBackground(A.index, B.index, w, h);
+      if (background) transfer.push(background.frames);
+    }
     const result = await ask(
-      { type: "analyze", a, b, width: w, height: h, options: { window_size: windowSize } },
-      [a, b],
+      { type: "analyze", a, b, width: w, height: h, options: { window_size: windowSize }, background },
+      transfer,
       (msg) => setStatus(msg),
     );
+    if (background) notes.push({ code: "background_removed", level: "info", text: `The still background was removed using ${background.count} frames from the video.` });
     const calib = calibration(pxScale, dt);
     state.last = { ...result, frame: imgA, calib, frames, width: w, height: h };
     const warnings = [...notes, ...resultWarnings(result, windowSize, Math.min(w, h))];
@@ -408,7 +435,12 @@ function imageWarnings(imgA, imgB, width) {
   if (quantile(0.99) < 0.25) out.push({ code: "dark", level: "warn", text: "The video is very dark. Add more light so the particles show clearly." });
   if (quantile(0.01) > 0.8) out.push({ code: "bright", level: "warn", text: "The video is very bright (washed out). Reduce exposure or lighting." });
   if (std < 0.03) out.push({ code: "low_texture", level: "warn", text: "Very little texture. PIV needs visible particles (pepper, glitter, coffee grounds) spread through the fluid." });
-  if (hist[255] + hist[254] + hist[253] > 0.05 * n) out.push({ code: "glare", level: "warn", text: "Large overexposed areas (glare or reflections). They hide particles and can give false vectors." });
+  // Glare = saturated patches in an otherwise darker picture. A white
+  // background with dark particles (shadow-graph, drawings, a white tray)
+  // is saturated almost everywhere by design and is fine for PIV, so only
+  // warn when the typical (median) pixel is not itself near white.
+  const saturated = hist[255] + hist[254] + hist[253];
+  if (saturated > 0.05 * n && quantile(0.5) < 0.9) out.push({ code: "glare", level: "warn", text: "Large overexposed areas (glare or reflections). They hide particles and can give false vectors." });
   if (width < 320) out.push({ code: "low_resolution", level: "warn", text: "Low resolution. Results will be coarse; record at a higher resolution if you can." });
   return out;
 }

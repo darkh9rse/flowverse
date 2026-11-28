@@ -23,6 +23,7 @@
 //! calibration (mm per pixel, frames per second).
 
 use flowverse_core::analysis::{self, CriticalPointKind, FitReport, FlowModel};
+use flowverse_core::background;
 use flowverse_core::piv::{self, PivConfig};
 use flowverse_core::synthetic::{self, ParticleImageConfig};
 use flowverse_core::{
@@ -80,9 +81,82 @@ pub fn synthetic_pair(flow: &str, width: u32, height: u32, seed: u32) -> Result<
         .map_err(|e| JsError::new(&e))
 }
 
+/// Remove the still background from frames A and B.
+///
+/// `frames` holds `count` RGBA frames back to back (all `width × height`),
+/// sampled from the video around A and B. Returns the cleaned A and B as
+/// gray RGBA, back to back, ready for [`run_piv`].
+#[wasm_bindgen]
+pub fn remove_background(
+    frames: &[u8],
+    count: u32,
+    frame_a: &[u8],
+    frame_b: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, JsError> {
+    remove_background_bytes(
+        frames,
+        count as usize,
+        frame_a,
+        frame_b,
+        width as usize,
+        height as usize,
+    )
+    .map_err(|e| JsError::new(&e))
+}
+
 // ---------------------------------------------------------------------------
 // Plain Rust implementations (testable without a browser)
 // ---------------------------------------------------------------------------
+
+pub fn remove_background_bytes(
+    frames: &[u8],
+    count: usize,
+    a: &[u8],
+    b: &[u8],
+    width: usize,
+    height: usize,
+) -> Result<Vec<u8>, String> {
+    let size = width * height * 4;
+    if frames.len() != count * size {
+        return Err(format!(
+            "expected {count} frames of {size} bytes, got {} bytes",
+            frames.len()
+        ));
+    }
+    let to_image =
+        |bytes: &[u8]| Image::from_rgba8(width, height, bytes).map_err(|e| format!("frame: {e}"));
+    let stack: Vec<Image> = frames
+        .chunks(size)
+        .map(to_image)
+        .collect::<Result<_, _>>()?;
+    let refs: Vec<&Image> = stack.iter().collect();
+    let bg = background::median_background(&refs).map_err(|e| e.to_string())?;
+    let mut a = background::subtract_background(&to_image(a)?, &bg);
+    let mut b = background::subtract_background(&to_image(b)?, &bg);
+    // The differences are small (a particle is maybe 0.2 brighter than the
+    // background). Stretch both frames by the same factor so they use the
+    // full 0–255 range when turned back into bytes; otherwise rounding to
+    // whole bytes would throw away most of the detail.
+    let peak = a
+        .data()
+        .iter()
+        .chain(b.data())
+        .fold(0.0f32, |m, &p| m.max(p));
+    if peak > 0.0 {
+        for img in [&mut a, &mut b] {
+            for y in 0..height {
+                for x in 0..width {
+                    img.set(x, y, img.get(x, y) / peak);
+                }
+            }
+        }
+    }
+    let mut out = a.to_rgba8();
+    out.extend(b.to_rgba8());
+    Ok(out)
+}
 
 /// PIV settings as they arrive from JavaScript. `Option` + `#[serde(default)]`
 /// means every field may be left out.
@@ -525,6 +599,21 @@ mod tests {
 
     /// The full JavaScript path, minus the browser: JSON flow → synthetic
     /// RGBA frames → PIV → analysis → fit, all through the JSON API.
+    #[test]
+    fn background_removal_keeps_only_what_changes() {
+        // 3 frames of a gray scene; frame A has one bright pixel extra.
+        let (w, h) = (4, 2);
+        let gray = |v: u8| [v, v, v, 255].repeat(w * h);
+        let mut a = gray(100);
+        a[4 * 5..4 * 5 + 3].copy_from_slice(&[200, 200, 200]);
+        let frames = [gray(100), gray(100), gray(100)].concat();
+        let out = remove_background_bytes(&frames, 3, &a, &gray(100), w, h).unwrap();
+        assert_eq!(out.len(), 2 * w * h * 4);
+        assert_eq!(out[4 * 5], 255); // the change, stretched to full white
+        assert_eq!(out[0], 0); // the still scene, removed
+        assert!(remove_background_bytes(&frames, 2, &a, &a, w, h).is_err());
+    }
+
     #[test]
     fn vortex_round_trip_through_the_json_api() {
         let flow = r#"{"type":"vortex","x":127.5,"y":127.5,"circulation":377,"core_radius":40}"#;

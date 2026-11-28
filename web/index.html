@@ -107,6 +107,10 @@
         </select>
         <small>Large videos are scaled down to this width first.</small>
       </label>
+      <label>Remove still background
+        <span><input type="checkbox" id="bg-remove" checked> on</span>
+        <small>Subtracts what stays still across ~2 s of video (the bottom, walls, reflections) so only moving particles are measured. Needs a steady camera. Turn off for very slow flows.</small>
+      </label>
     </div>
     <div class="actions">
       <button class="button primary" id="analyze" type="button" disabled>Analyse flow</button>

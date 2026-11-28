@@ -13,6 +13,8 @@
 //!   PIV can be tested against an exact answer.
 //! - [`piv`]: particle image velocimetry (FFT cross-correlation, Gaussian
 //!   sub-pixel peak, normalized median outlier test).
+//! - [`background`]: removes the still scene (streambed, walls) from
+//!   video frames, leaving only moving particles.
 //! - [`analysis`]: what the measured field means: vorticity, divergence,
 //!   critical points, and which simple flow model fits it best.
 //!
@@ -23,6 +25,7 @@
 
 // `pub mod` makes each module (one file in src/) part of the public API.
 pub mod analysis;
+pub mod background;
 pub mod flow;
 pub mod image;
 pub mod piv;

@@ -207,3 +207,67 @@ fn large_displacement_needs_multi_pass() {
     assert!(valid > 0.95, "only {:.1}% valid", valid * 100.0);
     assert!(rms < 0.1, "RMS error {rms} px too large");
 }
+
+#[test]
+fn background_subtraction_recovers_flow_over_a_textured_bed() {
+    use flowverse_core::Image;
+    use flowverse_core::background::{median_background, subtract_background};
+
+    // A still, strongly textured "streambed" (like rocks seen through clear
+    // water), brighter and coarser than the particles, plus particles
+    // moving 3 px right. Pixel values add (a bed seen through particles).
+    // Blotchy texture: a pseudo-random brightness per 5×5 px patch, like
+    // pebbles. (Integer hashing keeps it deterministic and dependency-free.)
+    let bed = |x: usize, y: usize| {
+        let (cx, cy) = ((x / 5) as u32, (y / 5) as u32);
+        let mut hsh = cx.wrapping_mul(0x9E37_79B1) ^ cy.wrapping_mul(0x85EB_CA77);
+        hsh ^= hsh >> 15;
+        hsh = hsh.wrapping_mul(0x2C1B_3C6D);
+        hsh ^= hsh >> 12;
+        0.8 * (hsh % 1000) as f32 / 1000.0
+    };
+    let add_bed = |img: &Image| {
+        let mut out = img.clone();
+        for y in 0..img.height() {
+            for x in 0..img.width() {
+                out.set(x, y, img.get(x, y) + bed(x, y));
+            }
+        }
+        out
+    };
+    let flow = Uniform { u: 3.0, v: 0.0 };
+    let cfg = |seed| ParticleImageConfig {
+        seed,
+        ..ParticleImageConfig::default()
+    };
+    let (a, b) = generate_pair(&flow, &cfg(1));
+    let (a, b) = (add_bed(&a), add_bed(&b));
+
+    // Without help, the bed's zero motion competes with the particles'.
+    let field = analyze(&a, &b, &PivConfig::default()).unwrap();
+    let (rms_raw, _, _) = error_stats(&field, &flow, 1.0);
+
+    // Background from 15 other moments of the "video": the same bed, with
+    // the particles elsewhere each time (independent particle fields).
+    let others: Vec<Image> = (10..25)
+        .map(|s| add_bed(&generate_pair(&flow, &cfg(s)).0))
+        .collect();
+    let refs: Vec<&Image> = others.iter().collect();
+    let bg = median_background(&refs).unwrap();
+    let field = analyze(
+        &subtract_background(&a, &bg),
+        &subtract_background(&b, &bg),
+        &PivConfig::default(),
+    )
+    .unwrap();
+    let (rms, max_err, valid) = error_stats(&field, &flow, 1.0);
+    println!(
+        "textured bed: raw rms {rms_raw:.3} px; background removed rms {rms:.3} px, max {max_err:.3}, valid {:.1}%",
+        valid * 100.0
+    );
+    assert!(
+        rms_raw > 0.5,
+        "the bed should spoil the raw measurement (rms {rms_raw})"
+    );
+    assert!(rms < 0.1 && valid > 0.95, "rms {rms}, valid {valid}");
+}

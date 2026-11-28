@@ -4,7 +4,7 @@
 // The page sends {id, type, ...}; we reply {id, ok, result} or
 // {id, ok: false, error}, plus {id, progress} messages along the way.
 
-import init, { run_piv, analyze_field, fit_flow, synthetic_pair } from "./pkg/flowverse_wasm.js";
+import init, { run_piv, analyze_field, fit_flow, synthetic_pair, remove_background } from "./pkg/flowverse_wasm.js";
 
 // Start loading the .wasm file immediately; each request awaits it.
 const ready = init();
@@ -14,10 +14,18 @@ self.onmessage = async (event) => {
   try {
     await ready;
     if (type === "analyze") {
-      const { a, b, width, height, options } = event.data;
-      self.postMessage({ id, progress: "Measuring motion (PIV)…" });
+      const { width, height, options, background } = event.data;
+      let a = new Uint8Array(event.data.a), b = new Uint8Array(event.data.b);
       const t0 = performance.now();
-      const fieldJson = run_piv(new Uint8Array(a), new Uint8Array(b), width, height, JSON.stringify(options));
+      if (background) {
+        // Optional: subtract the still scene (median of sampled frames).
+        self.postMessage({ id, progress: "Removing the still background…" });
+        const both = remove_background(new Uint8Array(background.frames), background.count, a, b, width, height);
+        a = both.subarray(0, width * height * 4);
+        b = both.subarray(width * height * 4);
+      }
+      self.postMessage({ id, progress: "Measuring motion (PIV)…" });
+      const fieldJson = run_piv(a, b, width, height, JSON.stringify(options));
       self.postMessage({ id, progress: "Finding vortices and stagnation points…" });
       const analysis = JSON.parse(analyze_field(fieldJson));
       self.postMessage({ id, progress: "Fitting flow models…" });

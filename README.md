@@ -5,9 +5,16 @@ Measure fluid flow from an ordinary phone video.
 FlowVerse turns two frames of a video of moving fluid into a velocity field
 using **particle image velocimetry (PIV)**, then analyses it: vorticity,
 divergence, critical points (vortex centres, saddles, sources, sinks), and
-which simple flow it most resembles (uniform stream, vortex, source/sink, or
-flow past a cylinder), with an R² score. An optional "Explain this flow"
-button writes a plain-language report.
+which simple flow it most resembles, with an R² score:
+
+| Ideal (inviscid) flows | Viscous channel flows (exact Navier–Stokes solutions) | Free flows |
+|---|---|---|
+| uniform stream, vortex, source/sink, flow past a cylinder | Couette (linear shear), Poiseuille (parabolic channel profile) | jet (fast core with two shear layers) |
+
+Fits that are physically impossible are ruled out even if their R² is high:
+for example, a "channel" whose walls would cross fluid that is visibly
+moving. An optional "Explain this flow" button writes a plain-language
+report.
 
 **Your video never leaves your device.** All measurement runs in your browser
 in WebAssembly. Only if you press "Explain this flow" are a few computed
@@ -48,6 +55,28 @@ function. The page shows exactly what will be sent.
 - If your phone's video won't open, record in "Most Compatible" / H.264
   instead of HEVC.
 
+### Real videos
+
+Two processing steps make ordinary videos work better:
+
+- **Multi-pass PIV.** Large windows first measure the rough motion; the
+  final small windows are shifted by it. Motions up to about a window size
+  are measured (with a single pass the limit is a quarter of that).
+- **Background removal** (on by default). The per-pixel median of 15
+  frames from about a second either side of A and B is the still scene: a
+  stream bottom seen through clear water, tank walls, a printed timestamp.
+  It is subtracted so only moving particles are measured. Needs a steady
+  camera; turn it off for flows so slow that particles barely move in two
+  seconds.
+
+Tested on: a high-speed lab recording of a laminar jet (classified as a jet,
+R² 0.97, 99 % reliable vectors), and a hand-held phone clip of a shallow
+canal with foam (no simple model fits, correctly; background removal raised
+the share of vectors following the current from 55 % to 64 % and the
+measured surface motion by ~45 %, which the still stream bed had been
+dragging towards zero). Filmed at an angle, speeds are distorted by
+perspective; film straight down for numbers you can trust.
+
 ### What the analysis can and can't resolve
 
 PIV measures the *average* motion inside each interrogation window, so
@@ -60,7 +89,7 @@ window, so very tight, fast vortices need smaller windows or closer frames.
 
 | Part | What it does |
 |---|---|
-| `core/` | Rust library `flowverse-core`: grayscale images, potential-flow elements (`Uniform`, `Source`, `Vortex`, `Doublet`, `Cylinder`), a synthetic particle-image generator, PIV (FFT cross-correlation, Gaussian sub-pixel peak, loss-of-pairs bias correction, normalized median outlier test), and analysis (gradients, critical points, Levenberg–Marquardt model fits). No web code. |
+| `core/` | Rust library `flowverse-core`: grayscale images, potential-flow elements (`Uniform`, `Source`, `Vortex`, `Doublet`, `Cylinder`), viscous `Couette` and `Poiseuille` flows and a free `Jet`, a synthetic particle-image generator, background removal (temporal median), PIV (multi-pass with window offset, FFT cross-correlation, Gaussian sub-pixel peak, loss-of-pairs bias correction, normalized median outlier test), and analysis (gradients, critical points, Levenberg–Marquardt model fits with physical plausibility checks). No web code. |
 | `wasm/` | Thin wasm-bindgen wrapper: RGBA frames in, JSON out. |
 | `web/` | Static site (plain HTML/JS/CSS, no build step). PIV runs in a Web Worker so the page stays responsive. `test.html` is a self-test. |
 | `functions/report/` | Netlify Function that sends the numeric summary to Claude for the plain-language report, with per-user rate limiting. The site falls back to a built-in text template whenever it is unavailable. |
