@@ -102,11 +102,15 @@ template. To try the AI report locally, use the
    `scripts/netlify-build.sh` (compiles the wasm package), publishes `web/`,
    and deploys `functions/report` at `/api/report`.
 2. In **Site configuration → Environment variables**, set:
-   - `ANTHROPIC_API_KEY`: enables AI reports. Leave it unset to run without them.
+   - `ANTHROPIC_API_KEY`: optional. Netlify's AI Gateway already provides one
+     automatically after the first production deploy, billed to your Netlify
+     credits (Team settings → Billing → Usage). Set your own key to bill your
+     Anthropic account instead.
    - `RATE_LIMIT_SALT`: a long random secret, used to hash visitor IPs for rate limiting.
-   - Optional limits: `REPORT_LIMIT_PER_HOUR` (default 10 per visitor),
-     `REPORT_LIMIT_PER_DAY` (30 per visitor), `REPORT_LIMIT_GLOBAL_PER_DAY`
-     (1000 for the whole site, which caps the AI bill).
+   - Optional limits: `REPORT_LIMIT_PER_HOUR` (default 5 per visitor),
+     `REPORT_LIMIT_PER_DAY` (10 per visitor), `REPORT_LIMIT_GLOBAL_PER_DAY`
+     (20 for the whole site, which caps the AI bill). Past a limit, visitors
+     get the built-in report instead.
 3. Deploy. Visit `/test.html` on the live site to confirm WebAssembly works.
 
 Netlify stops synchronous functions after 10 seconds by default. The report

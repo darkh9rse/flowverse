@@ -6,11 +6,15 @@
 // missing, unconfigured or failing, the page shows its built-in template.
 //
 // Environment variables (Netlify → Site configuration → Environment):
-//   ANTHROPIC_API_KEY            required to enable AI reports
+//   ANTHROPIC_API_KEY            enables AI reports. On Netlify, AI Gateway
+//                                injects one automatically (billed to the
+//                                Netlify account's credits); setting your own
+//                                key bills your Anthropic account instead.
 //   RATE_LIMIT_SALT              secret random string for hashing IPs
-//   REPORT_LIMIT_PER_HOUR        per user, default 10
-//   REPORT_LIMIT_PER_DAY         per user, default 30
-//   REPORT_LIMIT_GLOBAL_PER_DAY  whole site, default 1000
+//   REPORT_LIMIT_PER_HOUR        per user, default 5
+//   REPORT_LIMIT_PER_DAY         per user, default 10
+//   REPORT_LIMIT_GLOBAL_PER_DAY  whole site, default 20 (caps the AI bill;
+//                                past it, visitors get the built-in report)
 
 import Anthropic from "@anthropic-ai/sdk";
 import { getStore } from "@netlify/blobs";
@@ -49,9 +53,9 @@ function getLimiter() {
   }
   return createRateLimiter({
     store,
-    perHour: env("REPORT_LIMIT_PER_HOUR", 10),
-    perDay: env("REPORT_LIMIT_PER_DAY", 30),
-    globalPerDay: env("REPORT_LIMIT_GLOBAL_PER_DAY", 1000),
+    perHour: env("REPORT_LIMIT_PER_HOUR", 5),
+    perDay: env("REPORT_LIMIT_PER_DAY", 10),
+    globalPerDay: env("REPORT_LIMIT_GLOBAL_PER_DAY", 20),
   });
 }
 
