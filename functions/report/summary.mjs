@@ -11,7 +11,7 @@
 // Pure functions, standard JavaScript only: used by the Netlify function and
 // by the website (for the built-in template report).
 
-export const MODELS = ["uniform", "vortex", "source", "sink", "cylinder"];
+export const MODELS = ["uniform", "vortex", "source", "sink", "cylinder", "couette", "poiseuille"];
 export const POINT_KINDS = [
   "saddle", "center", "stable focus", "unstable focus", "stable node", "unstable node", "degenerate",
 ];
@@ -26,6 +26,10 @@ export const PARAMETERS = {
   source: ["x", "y", "strength", "core_radius"],
   sink: ["x", "y", "strength", "core_radius"],
   cylinder: ["x", "y", "radius", "stream_speed", "direction_deg"],
+  // Viscous channel flows (exact Navier–Stokes solutions). axis_deg is the
+  // flow line's direction, 0–180°, because Couette layers move both ways.
+  couette: ["shear_rate", "axis_deg"],
+  poiseuille: ["channel_width", "max_speed", "mean_speed", "wall_shear_rate", "direction_deg"],
 };
 
 /** A finite number of sane size, rounded to 4 significant figures, or null. */
@@ -96,7 +100,8 @@ You receive a JSON summary of numbers measured by particle image velocimetry (PI
 
 Write a short report in plain language:
 1. What kind of flow this looks like, and how confident the measurement is (use the R² of the best model and the fraction of reliable vectors).
-2. The key numbers with their units (speeds, size of a vortex core or cylinder, circulation or source strength, rotation direction), each explained in one everyday sentence.
+2. The key numbers with their units (speeds, size of a vortex core or cylinder, circulation or source strength, rotation direction, shear rate, channel width), each explained in one everyday sentence.
+Models "couette" (fluid sheared between a still and a sliding wall, a straight-line speed profile) and "poiseuille" (pressure-driven flow between two still walls, a parabolic profile) are viscous flows and exact solutions of the Navier–Stokes equations; the others are ideal, frictionless flows. For these two, explain in one sentence how viscosity and the no-slip condition at the walls shape the profile.
 3. What the other models' scores say: for example, why the flow is not a simple uniform stream.
 4. Any problems listed in "warnings", and one concrete tip for a better recording.
 

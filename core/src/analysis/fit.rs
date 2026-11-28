@@ -1,14 +1,22 @@
 //! Which simple flow does the measurement look like?
 //!
-//! Four candidate models are fitted to the measured field by least squares
+//! Six candidate models are fitted to the measured field by least squares
 //! (minimising the summed squared vector difference):
 //!
-//! | model    | parameters                          | count |
-//! |----------|-------------------------------------|-------|
-//! | uniform  | u, v                                | 2     |
-//! | vortex   | centre x, y; circulation Γ; core rc | 4     |
-//! | source   | centre x, y; strength m; core rc    | 4     |
-//! | cylinder | centre x, y; stream u, v; radius R  | 5     |
+//! | model      | parameters                                   | count |
+//! |------------|----------------------------------------------|-------|
+//! | uniform    | u, v                                         | 2     |
+//! | couette    | wall position, angle; shear rate             | 3     |
+//! | vortex     | centre x, y; circulation Γ; core rc          | 4     |
+//! | source     | centre x, y; strength m; core rc             | 4     |
+//! | poiseuille | centreline position, angle; half-width; peak | 4     |
+//! | cylinder   | centre x, y; stream u, v; radius R           | 5     |
+//!
+//! The first four plus the cylinder are ideal (inviscid) flows; Couette and
+//! Poiseuille are viscous channel flows, exact Navier–Stokes solutions (see
+//! [`crate::flow::Couette`]). A line in the plane has two degrees of freedom
+//! (position across it, and angle), which is why "wall position, angle"
+//! counts 2: sliding the line along itself changes nothing.
 //!
 //! Each fit gets an R² score: the fraction of the measured motion the model
 //! explains (1 = perfect, 0 = no better than "nothing moves").
@@ -33,7 +41,7 @@ use std::f64::consts::PI;
 
 use super::gradient::{ScalarField, divergence, grid_spacing, vorticity};
 use super::least_squares::levenberg_marquardt;
-use crate::flow::{Cylinder, FlowElement, Source, Uniform, Vortex};
+use crate::flow::{Couette, Cylinder, FlowElement, Poiseuille, Source, Uniform, Vortex};
 use crate::piv::{VectorField, VectorStatus};
 
 /// A model with fewer parameters is preferred if its R² is at most this
@@ -47,6 +55,8 @@ pub enum FlowModel {
     Vortex(Vortex),
     Source(Source),
     Cylinder(Cylinder),
+    Couette(Couette),
+    Poiseuille(Poiseuille),
 }
 
 impl FlowModel {
@@ -59,6 +69,8 @@ impl FlowModel {
             FlowModel::Source(s) if s.strength < 0.0 => "sink",
             FlowModel::Source(_) => "source",
             FlowModel::Cylinder(_) => "cylinder",
+            FlowModel::Couette(_) => "couette",
+            FlowModel::Poiseuille(_) => "poiseuille",
         }
     }
 
@@ -66,7 +78,8 @@ impl FlowModel {
     pub fn parameter_count(&self) -> usize {
         match self {
             FlowModel::Uniform(_) => 2,
-            FlowModel::Vortex(_) | FlowModel::Source(_) => 4,
+            FlowModel::Couette(_) => 3,
+            FlowModel::Vortex(_) | FlowModel::Source(_) | FlowModel::Poiseuille(_) => 4,
             FlowModel::Cylinder(_) => 5,
         }
     }
@@ -81,6 +94,8 @@ impl FlowElement for FlowModel {
             FlowModel::Vortex(f) => f.velocity(x, y),
             FlowModel::Source(f) => f.velocity(x, y),
             FlowModel::Cylinder(f) => f.velocity(x, y),
+            FlowModel::Couette(f) => f.velocity(x, y),
+            FlowModel::Poiseuille(f) => f.velocity(x, y),
         }
     }
 }
@@ -93,10 +108,10 @@ pub struct ModelFit {
     pub r_squared: f64,
 }
 
-/// All four fits plus the chosen best one.
+/// All six fits plus the chosen best one.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FitReport {
-    /// In order: uniform, vortex, source, cylinder.
+    /// In order: uniform, vortex, source, cylinder, couette, poiseuille.
     pub fits: Vec<ModelFit>,
     /// Index into `fits` of the best model.
     pub best: usize,
@@ -118,7 +133,7 @@ struct Sample {
     v: f64,
 }
 
-/// Fit all four models to the field's valid vectors.
+/// Fit all six models to the field's valid vectors.
 ///
 /// Returns `None` if there are fewer than 6 valid vectors, or if nothing
 /// moves (with no motion there is nothing to explain).
@@ -140,13 +155,25 @@ pub fn fit_flow_models(field: &VectorField) -> Option<FitReport> {
     }
     let (hx, hy) = grid_spacing(field).unwrap_or((1.0, 1.0));
     let guesses = Guesses::new(field, &samples, hx, hy);
+    // The channel models place their line relative to the middle of the data.
+    let (cx, cy) = (guesses.middle[0], guesses.middle[1]);
 
     // Each fit: starting parameters → least squares → turn into a model.
-    let candidates: [(Vec<f64>, fn(&[f64]) -> FlowModel); 4] = [
-        (guesses.uniform.to_vec(), uniform_model),
-        (guesses.vortex.to_vec(), vortex_model),
-        (guesses.source.to_vec(), source_model),
-        (guesses.cylinder.to_vec(), cylinder_model),
+    // `Box<dyn Fn>` holds "some function", either a plain `fn` or a closure
+    // that remembers (cx, cy); a plain `fn` pointer can't capture values.
+    let candidates: [(Vec<f64>, Box<dyn Fn(&[f64]) -> FlowModel>); 6] = [
+        (guesses.uniform.to_vec(), Box::new(uniform_model)),
+        (guesses.vortex.to_vec(), Box::new(vortex_model)),
+        (guesses.source.to_vec(), Box::new(source_model)),
+        (guesses.cylinder.to_vec(), Box::new(cylinder_model)),
+        (
+            guesses.couette.to_vec(),
+            Box::new(move |p: &[f64]| couette_model(cx, cy, p)),
+        ),
+        (
+            guesses.poiseuille.to_vec(),
+            Box::new(move |p: &[f64]| poiseuille_model(cx, cy, p)),
+        ),
     ];
     let fits: Vec<ModelFit> = candidates
         .into_iter()
@@ -227,6 +254,58 @@ fn cylinder_model(p: &[f64]) -> FlowModel {
     })
 }
 
+/// The point at signed distance `n` across a line at `angle` from `(cx, cy)`
+/// (the normal is `(−sin, cos)`, matching [`crate::flow::Couette`]).
+fn point_across(cx: f64, cy: f64, angle: f64, n: f64) -> (f64, f64) {
+    let (s, c) = angle.sin_cos();
+    (cx - n * s, cy + n * c)
+}
+
+/// Wrap an angle into (−π, π].
+fn wrap(angle: f64) -> f64 {
+    let a = angle.rem_euclid(2.0 * PI);
+    if a > PI { a - 2.0 * PI } else { a }
+}
+
+/// p = [wall offset n0 from (cx, cy), angle, shear rate].
+fn couette_model(cx: f64, cy: f64, p: &[f64]) -> FlowModel {
+    let (x, y) = point_across(cx, cy, p[1], p[0]);
+    // Turning the wall line by π gives the *same* flow (both the along-wall
+    // direction and the across-wall distance flip sign), so report the angle
+    // in (−π/2, π/2] to keep it unique.
+    let mut angle = wrap(p[1]);
+    if angle <= -PI / 2.0 {
+        angle += PI;
+    } else if angle > PI / 2.0 {
+        angle -= PI;
+    }
+    FlowModel::Couette(Couette {
+        x,
+        y,
+        angle,
+        shear_rate: p[2],
+    })
+}
+
+/// p = [centreline offset n0 from (cx, cy), angle, half-width, peak speed].
+fn poiseuille_model(cx: f64, cy: f64, p: &[f64]) -> FlowModel {
+    let (x, y) = point_across(cx, cy, p[1], p[0]);
+    // A negative peak along `angle` is the same as a positive peak along
+    // `angle + π` (the parabola is symmetric), so keep the peak positive.
+    let (angle, max_speed) = if p[3] < 0.0 {
+        (p[1] + PI, -p[3])
+    } else {
+        (p[1], p[3])
+    };
+    FlowModel::Poiseuille(Poiseuille {
+        x,
+        y,
+        angle: wrap(angle),
+        half_width: p[2].abs(),
+        max_speed,
+    })
+}
+
 /// Starting points for the fits, read from the data.
 ///
 /// Nonlinear least squares only finds the *nearest* minimum, so a good start
@@ -242,6 +321,10 @@ struct Guesses {
     vortex: [f64; 4],
     source: [f64; 4],
     cylinder: [f64; 5],
+    couette: [f64; 3],
+    poiseuille: [f64; 4],
+    /// Centroid of the vectors: the reference point for the channel lines.
+    middle: [f64; 2],
 }
 
 impl Guesses {
@@ -286,13 +369,132 @@ impl Guesses {
             ]
         };
 
+        let (couette, poiseuille) = channel_guesses(samples, cx, cy, h);
+
         Guesses {
             uniform: [mean_u, mean_v],
             vortex,
             source,
             cylinder,
+            couette,
+            poiseuille,
+            middle: [cx, cy],
         }
     }
+}
+
+/// Starting points for Couette and Poiseuille.
+///
+/// 1. **Direction.** Channel flow is (nearly) parallel, so the flow
+///    direction is the main axis of the velocity vectors: the angle θ that
+///    maximises Σ(u cos θ + v sin θ)². That is the classic principal-axis
+///    formula θ = ½ atan2(2Σuv, Σu² − Σv²). It works even when the fluid
+///    moves both ways (Couette with the wall in view), unlike the mean.
+/// 2. **Profile.** Project every vector onto that direction (speed `t`) and
+///    note its distance `n` across it. Then fit `t = a + b n` (Couette) and
+///    `t = a + b n + c n²` (Poiseuille) by ordinary linear least squares.
+/// 3. **Read off the physics.** Line: shear rate = b, wall where t = 0, at
+///    n = −a/b. Parabola: vertex (centreline) at n = −b/2c, peak
+///    U = a − b²/4c, and the walls where t = 0, h = √(−U/c).
+fn channel_guesses(samples: &[Sample], cx: f64, cy: f64, h: f64) -> ([f64; 3], [f64; 4]) {
+    let (suu, svv, suv) = samples.iter().fold((0.0, 0.0, 0.0), |acc, s| {
+        (acc.0 + s.u * s.u, acc.1 + s.v * s.v, acc.2 + s.u * s.v)
+    });
+    let mut angle = 0.5 * (2.0 * suv).atan2(suu - svv);
+    let (sn, cs) = angle.sin_cos();
+    let profile: Vec<(f64, f64)> = samples
+        .iter()
+        .map(|s| (-(s.x - cx) * sn + (s.y - cy) * cs, s.u * cs + s.v * sn))
+        .collect();
+    let extent = profile.iter().fold(h, |m, p| m.max(p.0.abs()));
+
+    // Straight line t = a + b n.
+    let line = polyfit::<2>(&profile);
+    let couette = match line {
+        Some([a, b]) if b.abs() > 1e-12 => {
+            [(-a / b).clamp(-100.0 * extent, 100.0 * extent), angle, b]
+        }
+        _ => [0.0, angle, 0.0],
+    };
+
+    // Parabola t = a + b n + c n².
+    let mut poiseuille = None;
+    if let Some([a, b, c]) = polyfit::<3>(&profile) {
+        if c != 0.0 {
+            let n0 = -b / (2.0 * c);
+            let peak = a - b * b / (4.0 * c);
+            let h2 = -peak / c;
+            if h2 > 0.0 && n0.abs() < 10.0 * extent {
+                // Flow running along −angle: flip so the peak is positive.
+                if peak < 0.0 {
+                    angle += PI;
+                }
+                // Turning by π also flips the sign of n.
+                let n0 = if peak < 0.0 { -n0 } else { n0 };
+                poiseuille = Some([n0, angle, h2.sqrt(), peak.abs()]);
+            }
+        }
+    }
+    // No sensible parabola (e.g. the profile curves the wrong way): start
+    // with a channel just wider than the data and the mean speed.
+    let poiseuille = poiseuille.unwrap_or_else(|| {
+        let mean = profile.iter().map(|p| p.1).sum::<f64>() / profile.len() as f64;
+        [0.0, angle, extent + h, 1.5 * mean]
+    });
+    (couette, poiseuille)
+}
+
+/// Least-squares polynomial `t = p[0] + p[1] n + …` of `K` coefficients
+/// through `(n, t)` points, via the normal equations. `const K: usize` is a
+/// *const generic*: the array size is part of the type, chosen per call
+/// (`polyfit::<2>` for a line, `polyfit::<3>` for a parabola).
+fn polyfit<const K: usize>(points: &[(f64, f64)]) -> Option<[f64; K]> {
+    // Scale n to about ±1 so the powers stay similar in size; otherwise
+    // n⁴ ~ 10⁸ next to 1 makes the equations badly conditioned.
+    let scale = points
+        .iter()
+        .fold(0.0f64, |m, p| m.max(p.0.abs()))
+        .max(1e-9);
+    let mut ata = [[0.0; K]; K];
+    let mut atb = [0.0; K];
+    for &(n, t) in points {
+        let mut pw = [1.0; K];
+        for k in 1..K {
+            pw[k] = pw[k - 1] * n / scale;
+        }
+        for i in 0..K {
+            atb[i] += pw[i] * t;
+            for j in 0..K {
+                ata[i][j] += pw[i] * pw[j];
+            }
+        }
+    }
+    // Gaussian elimination with partial pivoting.
+    for col in 0..K {
+        let pivot = (col..K).max_by(|&i, &j| ata[i][col].abs().total_cmp(&ata[j][col].abs()))?;
+        if ata[pivot][col].abs() < 1e-12 {
+            return None;
+        }
+        ata.swap(col, pivot);
+        atb.swap(col, pivot);
+        for row in col + 1..K {
+            let f = ata[row][col] / ata[col][col];
+            for k in col..K {
+                ata[row][k] -= f * ata[col][k];
+            }
+            atb[row] -= f * atb[col];
+        }
+    }
+    let mut x = [0.0; K];
+    for row in (0..K).rev() {
+        let rest: f64 = (row + 1..K).map(|k| ata[row][k] * x[k]).sum();
+        x[row] = (atb[row] - rest) / ata[row][row];
+    }
+    // Undo the scaling: coefficient k multiplies (n/scale)^k.
+    for (k, xk) in x.iter_mut().enumerate() {
+        *xk /= scale.powi(k as i32);
+    }
+    Some(x)
 }
 
 /// From a scalar field (vorticity or divergence) concentrated in a blob:
@@ -412,6 +614,82 @@ mod tests {
             (c.radius - 30.0).abs() < 1.0 && (c.u - 1.0).abs() < 0.02,
             "{c:?}"
         );
+    }
+
+    #[test]
+    fn exact_couette_flow_is_identified() {
+        // Still wall above the data, sloping 0.2 rad; fluid sheared below it.
+        let truth = Couette {
+            x: 60.0,
+            y: 20.0,
+            angle: 0.2,
+            shear_rate: 0.012,
+        };
+        let r = fit(&truth);
+        assert_eq!(r.best().model.name(), "couette", "{r:?}");
+        assert!(r.best().r_squared > 0.9999);
+        let FlowModel::Couette(c) = r.best().model else {
+            unreachable!()
+        };
+        assert!(
+            (c.angle - 0.2).abs() < 1e-4 && (c.shear_rate - 0.012).abs() < 1e-6,
+            "{c:?}"
+        );
+        // The fitted wall point may sit anywhere along the true wall line,
+        // so check its distance from that line instead of x and y.
+        let gap = -(c.x - 60.0) * 0.2f64.sin() + (c.y - 20.0) * 0.2f64.cos();
+        assert!(gap.abs() < 0.01, "wall {gap} px off");
+    }
+
+    #[test]
+    fn exact_poiseuille_flow_is_identified_in_both_directions() {
+        // A channel 180 px wide (walls at y ≈ 32 and 212), tilted slightly.
+        for (angle, expect) in [(-0.15, -0.15), (PI - 0.15, PI - 0.15)] {
+            let truth = Poiseuille {
+                x: 120.0,
+                y: 122.0,
+                angle,
+                half_width: 90.0,
+                max_speed: 1.4,
+            };
+            let r = fit(&truth);
+            assert_eq!(r.best().model.name(), "poiseuille", "{r:?}");
+            assert!(r.best().r_squared > 0.999, "{r:?}");
+            let FlowModel::Poiseuille(p) = r.best().model else {
+                unreachable!()
+            };
+            assert!((wrap(p.angle - expect)).abs() < 1e-3, "{p:?}");
+            assert!(
+                (p.half_width - 90.0).abs() < 1.0 && (p.max_speed - 1.4).abs() < 0.01,
+                "{p:?}"
+            );
+            let gap = -(p.x - 120.0) * angle.sin() + (p.y - 122.0) * angle.cos();
+            assert!(gap.abs() < 0.5, "centreline {gap} px off");
+        }
+    }
+
+    #[test]
+    fn potential_flows_are_not_mistaken_for_channel_flows() {
+        // A vortex has uniform vorticity in its core, like Couette shear,
+        // so make sure the circular pattern still wins.
+        let r = fit(&Vortex::rankine(118.0, 131.0, 400.0, 35.0));
+        assert_eq!(r.best().model.name(), "vortex");
+        let r = fit(&Uniform { u: 0.7, v: 0.9 });
+        assert_eq!(r.best().model.name(), "uniform");
+    }
+
+    #[test]
+    fn polyfit_recovers_a_parabola() {
+        let pts: Vec<(f64, f64)> = (-20..=20)
+            .map(|i| {
+                (
+                    i as f64 * 7.0,
+                    2.0 - 0.5 * i as f64 * 7.0 + 0.01 * (i as f64 * 7.0).powi(2),
+                )
+            })
+            .collect();
+        let [a, b, c] = polyfit::<3>(&pts).unwrap();
+        assert!((a - 2.0).abs() < 1e-9 && (b + 0.5).abs() < 1e-9 && (c - 0.01).abs() < 1e-12);
     }
 
     #[test]

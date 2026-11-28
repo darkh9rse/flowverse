@@ -233,6 +233,118 @@ impl FlowElement for Cylinder {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Viscous channel flows: exact solutions of the Navier–Stokes equations
+// ---------------------------------------------------------------------------
+//
+// Everything above is *potential* flow: no viscosity, and fluid slips freely
+// along walls. The two flows below are the opposite: viscosity is what
+// shapes them. They are two of the very few cases where the full
+// Navier–Stokes equations can be solved exactly:
+//
+// For steady flow between parallel walls, the velocity points along the walls
+// and only changes across them, u = u(n). Then the nonlinear term
+// (u·∇)u is zero, and Navier–Stokes reduces to
+//
+//     μ d²u/dn² = dp/ds            (s along the walls, n across them)
+//
+// so u(n) is at most a parabola. Two special cases:
+// - **Couette**: no pressure gradient, one wall slides. d²u/dn² = 0, so the
+//   profile is a straight line (pure shear).
+// - **Poiseuille**: both walls still, a pressure drop pushes the fluid.
+//   d²u/dn² is a negative constant, so the profile is a parabola, zero at
+//   the walls (no-slip) and fastest on the centreline.
+//
+// Both are described by a line in the image (a wall for Couette, the
+// centreline for Poiseuille) through `(x, y)` at `angle` radians from the
+// +x axis. Because y points down, a positive angle turns *clockwise* on
+// screen. The flow runs along `(cos angle, sin angle)`, and the signed
+// distance across the line is `n = −(x−x0)·sin(angle) + (y−y0)·cos(angle)`.
+
+/// Signed distance `n` of `(x, y)` from the line through `(x0, y0)` at
+/// `angle`, and the unit vector `(c, s)` along it.
+fn across_line(x0: f64, y0: f64, angle: f64, x: f64, y: f64) -> (f64, f64, f64) {
+    let (s, c) = angle.sin_cos();
+    (-(x - x0) * s + (y - y0) * c, c, s)
+}
+
+/// Plane Couette flow: fluid sheared between a still wall and a sliding one.
+///
+/// The still wall is the line through `(x, y)` at `angle`. The velocity
+/// points along the wall and grows linearly with distance `n` from it:
+/// `u = shear_rate · n`. (With the moving wall a distance H away sliding at
+/// speed U, `shear_rate = U / H`.) On the other side of the line (n < 0) the
+/// fluid moves backwards, which is the same straight-line profile continued.
+///
+/// The shear rate is also the flow's vorticity magnitude (`−shear_rate` in
+/// this crate's sign convention), the same everywhere: Couette flow
+/// rotates fluid elements even though every particle moves in a straight
+/// line. The wall shear stress is `μ · shear_rate`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Couette {
+    pub x: f64,
+    pub y: f64,
+    pub angle: f64,
+    pub shear_rate: f64,
+}
+
+impl FlowElement for Couette {
+    fn velocity(&self, x: f64, y: f64) -> (f64, f64) {
+        let (n, c, s) = across_line(self.x, self.y, self.angle, x, y);
+        let speed = self.shear_rate * n;
+        (speed * c, speed * s)
+    }
+}
+
+/// Plane Poiseuille flow: pressure-driven flow in a channel between two
+/// still walls.
+///
+/// The centreline passes through `(x, y)` at `angle`; the walls are
+/// `half_width` away on each side. Inside, the speed along the channel is
+/// `max_speed · (1 − n² / half_width²)`: a parabola that is zero at both
+/// walls (no-slip) and largest on the centreline. Outside the walls the
+/// velocity is zero (solid).
+///
+/// Useful facts that follow (h = half_width, U = max_speed, μ = viscosity):
+/// - mean speed across the channel: 2U/3
+/// - shear rate at the walls: 2U/h
+/// - pressure gradient driving it: dp/ds = −2μU/h²
+///
+/// A negative `max_speed` means flow in the `−angle` direction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Poiseuille {
+    pub x: f64,
+    pub y: f64,
+    pub angle: f64,
+    pub half_width: f64,
+    pub max_speed: f64,
+}
+
+impl Poiseuille {
+    /// Average speed over the channel width, `2/3` of the peak.
+    pub fn mean_speed(&self) -> f64 {
+        2.0 * self.max_speed / 3.0
+    }
+
+    /// Velocity gradient at the walls, `2 U / h`. Multiply by the viscosity
+    /// to get the wall shear stress.
+    pub fn wall_shear_rate(&self) -> f64 {
+        2.0 * self.max_speed / self.half_width
+    }
+}
+
+impl FlowElement for Poiseuille {
+    fn velocity(&self, x: f64, y: f64) -> (f64, f64) {
+        let (n, c, s) = across_line(self.x, self.y, self.angle, x, y);
+        let h = self.half_width;
+        if h <= 0.0 || n.abs() >= h {
+            return (0.0, 0.0); // inside a wall
+        }
+        let speed = self.max_speed * (1.0 - (n / h).powi(2));
+        (speed * c, speed * s)
+    }
+}
+
 /// Superposition: a pair of flow elements is itself a flow element whose
 /// velocity is the sum. Pairs can be nested to combine more than two, e.g.
 /// `(Uniform {..}, (source, sink))`.
@@ -460,6 +572,75 @@ mod tests {
         let side = cyl.velocity(-1.6 / 2.0 * r * 1.000001, 1.2 / 2.0 * r * 1.000001);
         assert!(close(side.0.hypot(side.1), 4.0, 1e-4));
         assert_eq!(cyl.velocity(1.0, 1.0), (0.0, 0.0)); // inside: solid
+    }
+
+    /// Second derivative of the along-flow speed across the line, by central
+    /// differences. For a channel flow Navier–Stokes says μ·d²u/dn² = dp/ds,
+    /// a constant, so this tells us the pressure gradient (divided by μ).
+    fn profile_curvature<F: FlowElement>(f: &F, angle: f64, x: f64, y: f64) -> f64 {
+        let (s, c) = angle.sin_cos();
+        let along = |n: f64| {
+            // Step a distance n across the line (normal = (−sin, cos)).
+            let (u, v) = f.velocity(x - n * s, y + n * c);
+            u * c + v * s
+        };
+        let d = 0.5;
+        (along(d) - 2.0 * along(0.0) + along(-d)) / (d * d)
+    }
+
+    #[test]
+    fn couette_is_linear_shear_with_no_slip_at_the_wall() {
+        let angle = 0.3;
+        let f = Couette {
+            x: 50.0,
+            y: 40.0,
+            angle,
+            shear_rate: 0.02,
+        };
+        let (s, c) = angle.sin_cos();
+        // On the wall: no-slip, zero velocity.
+        let on_wall = f.velocity(50.0 + 30.0 * c, 40.0 + 30.0 * s);
+        assert!(close(on_wall.0, 0.0, 1e-12) && close(on_wall.1, 0.0, 1e-12));
+        // 25 px away from the wall: speed 0.02 × 25 = 0.5, along the wall.
+        let (u, v) = f.velocity(50.0 - 25.0 * s, 40.0 + 25.0 * c);
+        assert!(close(u, 0.5 * c, 1e-12) && close(v, 0.5 * s, 1e-12));
+        // No pressure gradient: the profile has no curvature anywhere.
+        for (x, y) in [(10.0, 90.0), (80.0, 20.0)] {
+            assert!(close(profile_curvature(&f, angle, x, y), 0.0, 1e-9));
+        }
+    }
+
+    #[test]
+    fn poiseuille_is_a_parabola_between_still_walls() {
+        let angle = -0.4;
+        let f = Poiseuille {
+            x: 100.0,
+            y: 80.0,
+            angle,
+            half_width: 40.0,
+            max_speed: 1.5,
+        };
+        let (s, c) = angle.sin_cos();
+        let at = |n: f64| f.velocity(100.0 - n * s, 80.0 + n * c);
+        // Centreline: fastest, along the channel.
+        let (u, v) = at(0.0);
+        assert!(close(u, 1.5 * c, 1e-12) && close(v, 1.5 * s, 1e-12));
+        // Halfway to a wall: 1 − (1/2)² = 3/4 of the peak.
+        let (u, v) = at(20.0);
+        assert!(close(u.hypot(v), 1.125, 1e-12));
+        // At and beyond both walls: still (no-slip, then solid).
+        for n in [40.0, -40.0, 55.0] {
+            assert_eq!(at(n), (0.0, 0.0));
+        }
+        // Navier–Stokes: d²u/dn² = dp/ds / μ = −2U/h², the same everywhere
+        // inside the channel.
+        let expected = -2.0 * 1.5 / (40.0 * 40.0);
+        for n in [-30.0, 0.0, 12.0] {
+            let k = profile_curvature(&f, angle, 100.0 - n * s, 80.0 + n * c);
+            assert!(close(k, expected, 1e-9), "curvature {k} at n = {n}");
+        }
+        assert!(close(f.mean_speed(), 1.0, 1e-12));
+        assert!(close(f.wall_shear_rate(), 0.075, 1e-12));
     }
 
     #[test]

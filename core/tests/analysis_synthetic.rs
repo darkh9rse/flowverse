@@ -13,7 +13,8 @@ use flowverse_core::analysis::{
 use flowverse_core::piv::analyze;
 use flowverse_core::synthetic::generate_pair;
 use flowverse_core::{
-    Cylinder, FlowElement, ParticleImageConfig, PivConfig, Source, Uniform, VectorField, Vortex,
+    Couette, Cylinder, FlowElement, ParticleImageConfig, PivConfig, Poiseuille, Source, Uniform,
+    VectorField, Vortex,
 };
 
 const CENTRE: f64 = 127.5;
@@ -174,6 +175,63 @@ fn measured_cylinder_is_analysed() {
     );
     assert!((c.radius - 35.0).abs() < 3.0, "R = {}", c.radius);
     assert!((c.u - 1.0).abs() < 0.05 && c.v.abs() < 0.05, "{c:?}");
+}
+
+#[test]
+fn measured_couette_flow_is_analysed() {
+    // Still wall along the top edge (y = 0), sliding wall far below. The
+    // speed grows 0.01 px/frame per px, so 0.32 px across a 32 px window:
+    // well inside the gradient rule, and 2.5 px/frame at the bottom.
+    let shear = 0.01;
+    let field = measure(&Couette {
+        x: 0.0,
+        y: 0.0,
+        angle: 0.0,
+        shear_rate: shear,
+    });
+
+    // Couette vorticity is the same everywhere: −(shear rate) with y down.
+    let w = mean_near_centre(&field, &vorticity(&field).values, 80.0);
+    println!("vorticity {w:.5}, expected {:.5}", -shear);
+    assert!((w + shear).abs() < 0.1 * shear);
+
+    let report = fit_flow_models(&field).unwrap();
+    print_report(&report);
+    let FlowModel::Couette(c) = report.best().model else {
+        panic!("best fit is not Couette flow")
+    };
+    assert!(report.best().r_squared > 0.99);
+    assert!((c.shear_rate - shear).abs() < 0.03 * shear, "{c:?}");
+    assert!(c.angle.abs() < 0.01, "{c:?}");
+    // The wall line (where the fluid is still) is at y = 0.
+    assert!(c.y.abs() < 3.0, "wall at y = {}", c.y);
+}
+
+#[test]
+fn measured_poiseuille_flow_is_analysed() {
+    // Horizontal channel, walls at y = 17.5 and 237.5 (half-width 110 px).
+    // Peak 1.5 px/frame; the steepest change is at the walls, 2U/h = 0.027
+    // px/frame per px, i.e. 0.87 px across a window (gradient rule OK).
+    let truth = Poiseuille {
+        x: CENTRE,
+        y: CENTRE,
+        angle: 0.0,
+        half_width: 110.0,
+        max_speed: 1.5,
+    };
+    let field = measure(&truth);
+    let report = fit_flow_models(&field).unwrap();
+    print_report(&report);
+    let FlowModel::Poiseuille(p) = report.best().model else {
+        panic!("best fit is not Poiseuille flow")
+    };
+    assert!(report.best().r_squared > 0.98);
+    assert!((p.max_speed - 1.5).abs() < 0.03 * 1.5, "{p:?}");
+    assert!((p.half_width - 110.0).abs() < 5.0, "{p:?}");
+    assert!((p.y - CENTRE).abs() < 2.0 && p.angle.abs() < 0.01, "{p:?}");
+    // The derived physics follows: mean speed 2U/3, wall shear rate 2U/h.
+    assert!((p.mean_speed() - 1.0).abs() < 0.03);
+    assert!((p.wall_shear_rate() - 3.0 / 110.0).abs() < 0.1 * 3.0 / 110.0);
 }
 
 fn print_report(r: &flowverse_core::analysis::FitReport) {

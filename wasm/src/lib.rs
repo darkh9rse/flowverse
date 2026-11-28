@@ -26,8 +26,8 @@ use flowverse_core::analysis::{self, CriticalPointKind, FitReport, FlowModel};
 use flowverse_core::piv::{self, PivConfig};
 use flowverse_core::synthetic::{self, ParticleImageConfig};
 use flowverse_core::{
-    Cylinder, Doublet, FlowElement, Image, Source, Uniform, Vector, VectorField, VectorStatus,
-    Vortex,
+    Couette, Cylinder, Doublet, FlowElement, Image, Poiseuille, Source, Uniform, Vector,
+    VectorField, VectorStatus, Vortex,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -61,8 +61,8 @@ pub fn analyze_field(field: &str) -> Result<String, JsError> {
     analyze_field_json(field).map_err(|e| JsError::new(&e))
 }
 
-/// Fit uniform / vortex / source / cylinder models to a field produced by
-/// [`run_piv`] and report the best one with R² scores.
+/// Fit uniform / vortex / source / cylinder / Couette / Poiseuille models
+/// to a field produced by [`run_piv`] and report the best one with R² scores.
 #[wasm_bindgen]
 pub fn fit_flow(field: &str) -> Result<String, JsError> {
     fit_flow_json(field).map_err(|e| JsError::new(&e))
@@ -324,6 +324,15 @@ fn model_parameters(model: &FlowModel) -> Value {
         FlowModel::Cylinder(f) => {
             json!({ "x": f.x, "y": f.y, "u": f.u, "v": f.v, "radius": f.radius })
         }
+        // Angles in radians, image coordinates (y down); (x, y) is a point
+        // on the still wall (Couette) or on the centreline (Poiseuille).
+        FlowModel::Couette(f) => {
+            json!({ "x": f.x, "y": f.y, "angle": f.angle, "shear_rate": f.shear_rate })
+        }
+        FlowModel::Poiseuille(f) => json!({
+            "x": f.x, "y": f.y, "angle": f.angle,
+            "half_width": f.half_width, "max_speed": f.max_speed,
+        }),
     }
 }
 
@@ -361,6 +370,21 @@ enum FlowSpec {
         u: f64,
         v: f64,
         radius: f64,
+    },
+    Couette {
+        x: f64,
+        y: f64,
+        #[serde(default)]
+        angle: f64,
+        shear_rate: f64,
+    },
+    Poiseuille {
+        x: f64,
+        y: f64,
+        #[serde(default)]
+        angle: f64,
+        half_width: f64,
+        max_speed: f64,
     },
 }
 
@@ -402,6 +426,32 @@ impl FlowElement for FlowSpec {
                 u,
                 v,
                 radius,
+            }
+            .velocity(x, y),
+            FlowSpec::Couette {
+                x: x0,
+                y: y0,
+                angle,
+                shear_rate,
+            } => Couette {
+                x: x0,
+                y: y0,
+                angle,
+                shear_rate,
+            }
+            .velocity(x, y),
+            FlowSpec::Poiseuille {
+                x: x0,
+                y: y0,
+                angle,
+                half_width,
+                max_speed,
+            } => Poiseuille {
+                x: x0,
+                y: y0,
+                angle,
+                half_width,
+                max_speed,
             }
             .velocity(x, y),
         }

@@ -235,6 +235,11 @@ const DEMO_FLOWS = {
   sink: { type: "source", x: CX, y: CY, strength: -2 * Math.PI * 40 * 1.5, core_radius: 40 },
   cylinder: { type: "cylinder", x: CX, y: CY, u: 1.2, v: 0, radius: 40 },
   uniform: { type: "uniform", u: 2.3, v: -1.2 },
+  // Viscous channel flows. Couette: still wall along the top edge, speed
+  // rising 0.01 px/frame per px (2.5 px/frame at the bottom). Poiseuille:
+  // horizontal channel nearly filling the frame, peak 1.5 px/frame.
+  couette: { type: "couette", x: 0, y: 0, angle: 0, shear_rate: 0.01 },
+  poiseuille: { type: "poiseuille", x: CX, y: CY, angle: 0, half_width: 120, max_speed: 1.5 },
 };
 
 $("demo-button").addEventListener("click", async () => {
@@ -525,7 +530,10 @@ function renderSummary(r) {
 }
 
 function modelLabel(f) {
-  return { uniform: "a uniform flow", vortex: "a vortex", source: "a source", sink: "a sink", cylinder: "flow past a cylinder" }[f.model] ?? f.model;
+  return {
+    uniform: "a uniform flow", vortex: "a vortex", source: "a source", sink: "a sink", cylinder: "flow past a cylinder",
+    couette: "Couette (shear) flow", poiseuille: "Poiseuille (channel) flow",
+  }[f.model] ?? f.model;
 }
 
 /** Best-fit parameters as [label, value] rows, in calibrated units. */
@@ -557,6 +565,23 @@ function modelParameters(f, c) {
         ["Stream speed", `${fmt(c.speed(Math.hypot(p.u, p.v)))} ${c.speedUnit}`],
         ["Stream direction", direction(p.u, p.v)],
       ];
+    // Viscous channel flows. `angle` is the flow line's direction (radians,
+    // y down); (x, y) lies on the still wall / the centreline.
+    case "couette":
+      return [
+        ["Shear rate", `${fmt(c.rate(Math.abs(p.shear_rate)))} 1/s`],
+        ["Still wall through", `(${fmt(c.length(p.x))}, ${fmt(c.length(p.y))}) ${c.lengthUnit}`],
+        ["Layers run", axis(p.angle)],
+      ];
+    case "poiseuille":
+      return [
+        ["Channel width", `${fmt(c.length(2 * p.half_width))} ${c.lengthUnit}`],
+        ["Centreline through", `(${fmt(c.length(p.x))}, ${fmt(c.length(p.y))}) ${c.lengthUnit}`],
+        ["Peak speed", `${fmt(c.speed(p.max_speed))} ${c.speedUnit}`],
+        ["Mean speed (⅔ peak)", `${fmt(c.speed((2 * p.max_speed) / 3))} ${c.speedUnit}`],
+        ["Wall shear rate", `${fmt(c.rate((2 * p.max_speed) / p.half_width))} 1/s`],
+        ["Flow direction", direction(Math.cos(p.angle), Math.sin(p.angle))],
+      ];
     default:
       return [];
   }
@@ -567,6 +592,14 @@ function direction(u, v) {
   const names = ["right", "down-right", "down", "down-left", "left", "up-left", "up", "up-right"];
   const ang = Math.atan2(v, u);
   return names[(Math.round(ang / (Math.PI / 4)) + 8) % 8];
+}
+
+/** A line's direction as an angle from horizontal (0–180°, measured
+ * anticlockwise on screen), e.g. "12° from horizontal". */
+function axis(angle) {
+  // Round first, then wrap, so a hair under 180° reads as 0°.
+  const deg = Math.round((((-angle * 180) / Math.PI) % 180) + 180) % 180;
+  return `${deg}° from horizontal`;
 }
 
 /** Three significant figures, without silly exponents for normal values. */

@@ -134,6 +134,20 @@ function physical(f, c) {
         stream_speed: c.speed(Math.hypot(p.u, p.v)),
         direction_deg: directionDeg(p.u, p.v),
       };
+    case "couette":
+      return {
+        shear_rate: c.rate(Math.abs(p.shear_rate)),
+        // Round before wrapping so a hair under 180° reads as 0°.
+        axis_deg: Math.round(directionDeg(Math.cos(p.angle), Math.sin(p.angle))) % 180,
+      };
+    case "poiseuille":
+      return {
+        channel_width: c.length(2 * p.half_width),
+        max_speed: c.speed(p.max_speed),
+        mean_speed: c.speed((2 * p.max_speed) / 3),
+        wall_shear_rate: c.rate((2 * p.max_speed) / p.half_width),
+        direction_deg: directionDeg(Math.cos(p.angle), Math.sin(p.angle)),
+      };
     default:
       return {};
   }
@@ -161,7 +175,10 @@ const ADVICE = {
   many_points: "Many critical points were found, so some are probably noise.",
 };
 
-const NAMES = { uniform: "uniform flow", vortex: "vortex", source: "source", sink: "sink", cylinder: "cylinder" };
+const NAMES = {
+  uniform: "uniform flow", vortex: "vortex", source: "source", sink: "sink", cylinder: "cylinder",
+  couette: "Couette (shear) flow", poiseuille: "Poiseuille (channel) flow",
+};
 
 export function templateReport(s) {
   const L = s.units.length;
@@ -179,6 +196,8 @@ export function templateReport(s) {
       source: `The flow looks like a source: fluid spreading outwards from one spot, as if welling up from below or coming out of a pipe. Its strength (how much fluid appears per second, per unit depth) is about ${n(p.strength)} ${L}²/s.`,
       sink: `The flow looks like a sink: fluid converging on one spot, as if draining away there. Its strength is about ${n(Math.abs(p.strength))} ${L}²/s flowing in.`,
       cylinder: `The flow looks like a stream passing a round obstacle about ${n(p.radius)} ${L} in radius. Far from it the fluid moves at about ${n(p.stream_speed)} ${L}/s towards the ${words(p.direction_deg)}; it splits around the obstacle, speeds up at its sides and slows down in front and behind.`,
+      couette: `The flow looks like Couette flow: layers of fluid sliding past each other, as between a still wall and a moving one, along a line ${n(p.axis_deg)}° from horizontal. The speed grows steadily with distance from the still wall, by about ${n(p.shear_rate)} ${L}/s for every ${L} (the shear rate, ${n(p.shear_rate)} per second). Viscosity passes the moving wall's motion through the fluid layer by layer, and the fluid touching each wall moves with it (the no-slip condition). This is one of the few exact solutions of the Navier–Stokes equations.`,
+      poiseuille: `The flow looks like Poiseuille flow: fluid pushed along a channel about ${n(p.channel_width)} ${L} wide, towards the ${words(p.direction_deg)}. The speed profile across the channel is a parabola: fastest in the middle, about ${n(p.max_speed)} ${L}/s, and zero at both walls, where friction (viscosity) holds the fluid still. The average speed is two thirds of the peak, about ${n(p.mean_speed)} ${L}/s. A steady pressure drop along the channel balances the friction; this is an exact solution of the Navier–Stokes equations.`,
       uniform: `Everything moves together in the same direction, towards the ${words(p.direction_deg)} at about ${n(p.speed)} ${L}/s.`,
     }[best.model];
     out.push(describe);
